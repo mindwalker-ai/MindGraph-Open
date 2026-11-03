@@ -15,12 +15,13 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use futures_util::stream;
-use mindgraph_core::{IngestionJob, IngestionService, JobStatus};
+use mindgraph_core::{AiStatus, ApplicationError, IngestionJob, IngestionService, JobStatus};
 use mindgraph_domain::{DataSourceId, GraphId, IngestionJobId};
 
 use crate::dto::{
-    CreateOntologyRequest, DataSourceResponse, IngestionAcceptedResponse, IngestionRequest,
-    JobAcceptedResponse, JobResponse, OntologyResponse,
+    CreateOntologyRequest, DataSourceResponse, GraphBuilderStatusResponse,
+    IngestionAcceptedResponse, IngestionRequest, JobAcceptedResponse, JobResponse,
+    OntologyResponse,
 };
 use crate::error::ApiError;
 use crate::routes::{AppState, graph_id};
@@ -189,7 +190,22 @@ pub(crate) async fn start_ingestion(
     body: Result<Json<IngestionRequest>, JsonRejection>,
 ) -> Result<(StatusCode, HeaderMap, Json<IngestionAcceptedResponse>), ApiError> {
     let (graph_id, data_source_id) = data_source_path(path)?;
-    let key = headers
+    let key = idempotency_key(&headers)?;
+    let Json(request) = body?;
+    let job = state
+        .ingestion
+        .start_ingestion(graph_id, data_source_id, &key, request.mapping)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        location(&format!("/api/v1/jobs/{}", job.id)),
+        Json(IngestionAcceptedResponse::from(&job)),
+    ))
+}
+
+/// The required `Idempotency-Key` header.
+fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
+    Ok(headers
         .get("idempotency-key")
         .ok_or_else(|| {
             ApiError::new(
@@ -206,17 +222,41 @@ pub(crate) async fn start_ingestion(
                 "The `Idempotency-Key` header must be visible ASCII",
             )
         })?
-        .to_owned();
-    let Json(request) = body?;
-    let job = state
-        .ingestion
-        .start_ingestion(graph_id, data_source_id, &key, request.mapping)
+        .to_owned())
+}
+
+/// `POST /api/v1/graphs/{graph_id}/data-sources/{data_source_id}/graph-builder/suggestions`
+/// with a required `Idempotency-Key`. The result is read with the job API.
+pub(crate) async fn request_suggestion(
+    State(state): State<AppState>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, HeaderMap, Json<JobAcceptedResponse>), ApiError> {
+    let (graph_id, data_source_id) = data_source_path(path)?;
+    let key = idempotency_key(&headers)?;
+    let Some(builder) = &state.graph_builder else {
+        return Err(ApplicationError::AiNotConfigured.into());
+    };
+    let job = builder
+        .start_suggestion(graph_id, data_source_id, &key)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
         location(&format!("/api/v1/jobs/{}", job.id)),
-        Json(IngestionAcceptedResponse::from(&job)),
+        Json(JobAcceptedResponse::from(&job)),
     ))
+}
+
+/// `GET /api/v1/graph-builder/status`: whether AI suggestions can be
+/// requested. Always `200`; manual ingestion never depends on it.
+pub(crate) async fn graph_builder_status(
+    State(state): State<AppState>,
+) -> Json<GraphBuilderStatusResponse> {
+    let status = match &state.graph_builder {
+        Some(builder) => builder.status().await,
+        None => AiStatus::NotConfigured,
+    };
+    Json(GraphBuilderStatusResponse::from(status))
 }
 
 /// `GET /api/v1/jobs/{job_id}`

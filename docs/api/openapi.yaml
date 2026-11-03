@@ -9,6 +9,12 @@ info:
     (1–128 visible ASCII characters); otherwise one is generated. Every error
     uses the same envelope, whose `request_id` matches the header.
 
+    The AI Graph Builder (M5) is optional. It *suggests* an ontology and an
+    M4 mapping for an analysed data source; MindGraph validates the
+    suggestion, the user reviews it, and the reviewed result is submitted
+    with the ordinary ontology and ingestion endpoints. The AI never writes
+    graph data, ontologies or mappings.
+
     Dataset ingestion (M4) is deterministic and needs no AI service:
     define an ontology, upload a CSV or JSON file, analyse it (an
     asynchronous job), then submit a mapping (another job). Jobs are
@@ -24,8 +30,10 @@ tags:
   - name: graphs
   - name: datasets
     description: Upload, analysis and ingestion of CSV / flat JSON files (M4).
+  - name: graph-builder
+    description: AI Graph Builder suggestions (M5, optional).
   - name: jobs
-    description: Background analysis and ingestion jobs (M4).
+    description: Background analysis, ingestion and AI suggestion jobs.
 paths:
   /health:
     get:
@@ -315,6 +323,80 @@ paths:
         "415": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/data-sources/{data_source_id}/graph-builder/suggestions:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/DataSourceId"
+    post:
+      tags: [graph-builder]
+      operationId: requestGraphBuilderSuggestion
+      summary: Ask the AI Graph Builder for an ontology and mapping suggestion
+      description: |
+        Starts an `ai_suggest` job for an analysed (`ready`) data source,
+        pinned to the graph's active ontology version. The AI receives only
+        the dataset profile (field names, inferred types, nullability,
+        non-null counts, up to 5 sample values per field and up to 10 sample
+        rows) and the active ontology. Never the file, other records or graph
+        contents.
+
+        The result (read with `GET /api/v1/jobs/{job_id}`) is a suggestion that
+        passed MindGraph's own validation: existing types kept, the mapping
+        valid against the dataset. It is a draft. Nothing is stored in the
+        ontology or the graph until the reviewed ontology and mapping are
+        submitted with `POST .../ontology` and `POST .../ingestions`.
+
+        Provider calls can cost money: the same `Idempotency-Key` (per graph)
+        returns the original job without another provider call; reusing it
+        for another data source or job kind is `409 CONFLICT`.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: 1–255 visible ASCII characters chosen by the client, e.g. a UUID.
+          schema: { type: string, minLength: 1, maxLength: 255 }
+      responses:
+        "202":
+          description: The suggestion job was queued (or the original job for a repeated key).
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+            Location:
+              description: URL of the job.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAccepted" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503":
+          description: |
+            `AI_NOT_CONFIGURED` (no provider configured; build the ontology and
+            mapping manually), `AI_UNAVAILABLE` (the AI service cannot be
+            reached) or `SERVICE_UNAVAILABLE`.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: AI_NOT_CONFIGURED
+                  message: The AI Graph Builder is not configured; build the ontology and mapping manually
+                  request_id: 0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f
+  /api/v1/graph-builder/status:
+    get:
+      tags: [graph-builder]
+      operationId: getGraphBuilderStatus
+      summary: Whether AI suggestions can be requested now
+      description: Always `200`. Never contains URLs or credentials. Manual flows never depend on it.
+      responses:
+        "200":
+          description: The AI Graph Builder status.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GraphBuilderStatus" }
   /api/v1/jobs/{job_id}:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -400,7 +482,8 @@ components:
         `METHOD_NOT_ALLOWED` (405), `CONFLICT` (409), `PAYLOAD_TOO_LARGE` (413),
         `UNSUPPORTED_MEDIA_TYPE`, `UNSUPPORTED_FILE_TYPE` (415),
         `VALIDATION_FAILED`, `INVALID_MAPPING` (422), `INTERNAL_ERROR` (500),
-        `SERVICE_UNAVAILABLE`, `NOT_READY` (503). Messages never contain
+        `SERVICE_UNAVAILABLE`, `AI_NOT_CONFIGURED`, `AI_UNAVAILABLE`,
+        `NOT_READY` (503). Messages never contain
         dataset values or filesystem paths.
       headers:
         x-request-id: { $ref: "#/components/headers/RequestId" }
@@ -700,20 +783,28 @@ components:
         id: { type: string, format: uuid }
         graph_id: { type: string, format: uuid }
         data_source_id: { type: string, format: uuid }
-        kind: { type: string, enum: [analyze, ingest] }
+        kind: { type: string, enum: [analyze, ingest, ai_suggest] }
         status: { type: string, enum: [queued, running, completed, failed, cancelled] }
         progress: { type: number, minimum: 0, maximum: 1, description: Never decreases; 1 when completed. }
         ontology_version:
           type: [integer, "null"]
           minimum: 1
-          description: The pinned ontology version of an ingestion job; null for analysis.
+          description: |
+            The pinned ontology version: the version an ingestion was
+            validated against, or the base of an AI suggestion; null for
+            analysis.
         error:
           oneOf:
             - { $ref: "#/components/schemas/JobError" }
             - { type: "null" }
         result:
+          description: |
+            By job kind: `ingest` → `IngestionSummary`, `ai_suggest` →
+            `GraphBuilderResult`, `analyze` → null (the profile is stored on the
+            data source). Null until the job completes.
           oneOf:
             - { $ref: "#/components/schemas/IngestionSummary" }
+            - { $ref: "#/components/schemas/GraphBuilderResult" }
             - { type: "null" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -723,3 +814,65 @@ components:
       properties:
         job_id: { type: string, format: uuid }
         status: { type: string, enum: [queued] }
+    TypeAnnotation:
+      type: object
+      required: [name, confidence, reason, existing]
+      properties:
+        name: { type: string, description: An entity or relationship type name. }
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: The model's own confidence estimate; not a statistical guarantee.
+        reason: { type: string, maxLength: 300 }
+        existing: { type: boolean, description: Set by MindGraph from the base ontology, not by the model. }
+    GraphBuilderSuggestion:
+      type: object
+      required: [ontology, mapping, confidence, annotations, warnings]
+      properties:
+        ontology:
+          $ref: "#/components/schemas/CreateOntologyRequest"
+          description: |
+            The complete proposed next ontology version, in the same shape as
+            `POST /api/v1/graphs/{graph_id}/ontology`. Existing types,
+            property types, requiredness and relationship endpoints are kept;
+            only new types and optional properties are added.
+        mapping:
+          $ref: "#/components/schemas/IngestionMapping"
+          description: An unchanged M4 ingestion mapping, valid against the dataset profile.
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        annotations:
+          type: object
+          required: [entities, relationships]
+          properties:
+            entities:
+              type: array
+              maxItems: 25
+              items: { $ref: "#/components/schemas/TypeAnnotation" }
+            relationships:
+              type: array
+              maxItems: 50
+              items: { $ref: "#/components/schemas/TypeAnnotation" }
+        warnings:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 300 }
+    GraphBuilderResult:
+      type: object
+      required: [prompt_version, provider, model, ontology_version_base, repair_attempts, suggestion]
+      description: The result of an `ai_suggest` job. Never the prompt, the raw provider response or any reasoning.
+      properties:
+        prompt_version: { type: string, example: graph_builder_v1 }
+        provider: { type: string, example: openai_compatible }
+        model: { type: string }
+        ontology_version_base: { type: integer, minimum: 1 }
+        repair_attempts: { type: integer, minimum: 0, maximum: 2 }
+        suggestion: { $ref: "#/components/schemas/GraphBuilderSuggestion" }
+    GraphBuilderStatus:
+      type: object
+      required: [status, configured]
+      properties:
+        status: { type: string, enum: [ready, not_configured, unavailable] }
+        configured: { type: boolean }
+        provider: { type: string }
+        model: { type: string }

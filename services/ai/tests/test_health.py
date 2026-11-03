@@ -15,11 +15,3 @@ def test_health_reports_ok() -> None:
         "service": "mindgraph-ai",
         "version": __version__,
     }
-
-
-def test_internal_endpoints_are_not_implemented_yet() -> None:
-    client = TestClient(create_app())
-
-    response = client.post("/internal/v1/ontology/suggest", json={})
-
-    assert response.status_code == 404

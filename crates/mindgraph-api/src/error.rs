@@ -114,6 +114,16 @@ impl From<ApplicationError> for ApiError {
             ApplicationError::Unprocessable { code, message } => {
                 Self::new(StatusCode::UNPROCESSABLE_ENTITY, code, message)
             }
+            ApplicationError::AiNotConfigured => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AI_NOT_CONFIGURED",
+                "The AI Graph Builder is not configured; build the ontology and mapping manually",
+            ),
+            ApplicationError::AiUnavailable => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AI_UNAVAILABLE",
+                "The AI service is unavailable; try again later or continue manually",
+            ),
             ApplicationError::Unavailable(source) => {
                 warn!(error = %source, "a required backend is unavailable");
                 Self::new(

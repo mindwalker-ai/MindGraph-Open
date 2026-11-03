@@ -8,7 +8,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
-use mindgraph_core::{CreateGraphProject, GraphProjectService, IngestionService, OntologyService};
+use mindgraph_core::{
+    CreateGraphProject, GraphBuilderService, GraphProjectService, IngestionService, OntologyService,
+};
 use mindgraph_domain::GraphId;
 use serde::Serialize;
 
@@ -30,6 +32,9 @@ pub struct AppState {
     pub(crate) graph_projects: Arc<GraphProjectService>,
     pub(crate) ontology: Arc<OntologyService>,
     pub(crate) ingestion: Arc<IngestionService>,
+    /// `None` until an AI Graph Builder is attached: suggestions are then
+    /// `503 AI_NOT_CONFIGURED`.
+    pub(crate) graph_builder: Option<Arc<GraphBuilderService>>,
 }
 
 impl AppState {
@@ -44,7 +49,15 @@ impl AppState {
             graph_projects: Arc::new(graph_projects),
             ontology: Arc::new(ontology),
             ingestion: Arc::new(ingestion),
+            graph_builder: None,
         }
+    }
+
+    /// Attaches the AI Graph Builder.
+    #[must_use]
+    pub fn with_graph_builder(mut self, graph_builder: GraphBuilderService) -> Self {
+        self.graph_builder = Some(Arc::new(graph_builder));
+        self
     }
 }
 
@@ -79,6 +92,11 @@ pub fn router(state: AppState) -> Router {
             "/graphs/{graph_id}/data-sources/{data_source_id}/ingestions",
             post(datasets::start_ingestion),
         )
+        .route(
+            "/graphs/{graph_id}/data-sources/{data_source_id}/graph-builder/suggestions",
+            post(datasets::request_suggestion),
+        )
+        .route("/graph-builder/status", get(datasets::graph_builder_status))
         .route("/jobs/{job_id}", get(datasets::get_job))
         .route("/jobs/{job_id}/events", get(datasets::job_events));
     Router::new()

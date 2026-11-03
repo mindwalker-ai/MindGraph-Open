@@ -9,10 +9,10 @@ use mindgraph_domain::{
     DataSource, DataSourceId, DataSourceStatus, DomainError, GraphId, GraphProject, GraphStatus,
     IngestionJobId, Ontology, OntologyVersion, Workspace, WorkspaceId,
 };
-use mindgraph_ingestion::{DatasetProfile, IngestionSummary};
+use mindgraph_ingestion::DatasetProfile;
 
 use crate::metadata::{DataSourceRecord, LOCAL_WORKSPACE_NAME, MetadataStore, MetadataStoreError};
-use crate::{IngestionJob, JobError, JobStatus};
+use crate::{IngestionJob, JobError, JobResult, JobStatus};
 
 /// An in-memory [`MetadataStore`]: the reference behaviour of the contract,
 /// for tests and local development. Data is lost when the process exits.
@@ -449,13 +449,22 @@ impl MetadataStore for MemoryMetadataStore {
     async fn complete_job(
         &self,
         id: IngestionJobId,
-        result: Option<&IngestionSummary>,
+        result: Option<&JobResult>,
     ) -> Result<IngestionJob, MetadataStoreError> {
         let mut state = self.state();
         let job = job_mut(&mut state, id, &[JobStatus::Running], "complete")?;
+        if let Some(result) = result
+            && result.kind() != job.kind
+        {
+            return Err(MetadataStoreError::InvalidInput(format!(
+                "a {} result cannot complete {} job {id}",
+                result.kind(),
+                job.kind
+            )));
+        }
         job.status = JobStatus::Completed;
         job.progress = 1.0;
-        job.result = result.copied();
+        job.result = result.cloned();
         job.updated_at = touch(job.updated_at);
         Ok(job.clone())
     }

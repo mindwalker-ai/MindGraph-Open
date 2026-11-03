@@ -1100,6 +1100,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mindgraph-ai-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mindgraph-core",
+ "mindgraph-ingestion",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "mindgraph-api"
 version = "0.1.0"
 dependencies = [
@@ -1107,6 +1122,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "mindgraph-ai-client",
  "mindgraph-core",
  "mindgraph-domain",
  "mindgraph-graph",
@@ -1138,6 +1154,8 @@ dependencies = [
  "mindgraph-domain",
  "mindgraph-graph",
  "mindgraph-ingestion",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

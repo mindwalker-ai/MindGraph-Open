@@ -412,3 +412,144 @@ Before lookups were batched, 1,000 such rows took 119 s against HugeGraph
 - A new ontology version replaces the whole type set; existing graph data is
   not migrated or checked against it.
 
+## AI Graph Builder (ADR-007, ADR-008, M5)
+
+AI suggests. Rust validates. The user reviews. M4 executes. The AI layer
+never writes graph data, ontologies or mappings, and there is no second
+ingestion pipeline.
+
+```text
+Web (Graph Builder) ──/api/v1 proxy──► mindgraph-api
+                                          │
+                                          ▼
+                          GraphBuilderService (mindgraph-core)
+                          │  ai_suggest job: pinned ontology, Idempotency-Key
+                          ▼
+            GraphBuilderAi (port) ◄── HttpGraphBuilderAi (mindgraph-ai-client, reqwest)
+                                          │ POST /internal/v1/graph-builder/suggest
+                                          ▼
+                       mindgraph-ai (FastAPI): prompt graph_builder_v1
+                          LLMProvider ◄── OpenAICompatibleProvider (httpx2)
+                                          │ POST {base_url}/chat/completions
+                                          ▼
+                              any OpenAI-compatible model server
+        result: strict JSON ─► Pydantic ─► Rust validation ─► job result (a draft)
+
+User reviews/edits the draft ─► POST /graphs/{id}/ontology ─► POST .../ingestions ─► M4 engine
+```
+
+### Boundaries
+
+| Component | Owns | Does not |
+| --- | --- | --- |
+| `mindgraph-core` | `GraphBuilderAi` port, `GraphBuilderService`, authoritative validation, job | depend on reqwest, FastAPI or provider types |
+| `mindgraph-ai-client` | HTTP to the AI service: one `reqwest::Client`, timeout, `x-request-id`, DTO decoding, 1 MiB response cap, error mapping | expose `reqwest` types |
+| `services/ai` | provider interface, OpenAI-compatible adapter, prompt, Pydantic schemas | read files, call PostgreSQL or HugeGraph, persist anything |
+| `apps/web` | review draft state, editing, the generate sequence | parse files, call the AI service directly |
+
+`mindgraph-ai-client` is an infrastructure adapter crate, not a runtime
+service (ADR-007 addendum). Core's dependency check still forbids HTTP
+clients in `mindgraph-core`.
+
+### What the model receives
+
+The request is the bounded M4 profile plus the pinned ontology:
+
+- field names, inferred types, nullability and non-null counts;
+- up to 5 sample values per field (each at most 200 characters);
+- up to 10 sample rows (fewer if the profile would exceed 96 KiB);
+- the active ontology's types (names, properties, endpoints), without ids.
+
+Never the source file, other records, filesystem paths, graph contents or
+credentials. Requests are user-triggered only (the AI Model step or the API).
+
+### Prompt
+
+`graph_builder_v1` (returned as `prompt_version` with every result). The
+system prompt tells the model to treat everything inside `<context>` as
+untrusted data, to model entities conservatively (no entity per field),
+to prefer `*_id` identifiers typed as strings (leading zeros), to keep the
+existing ontology intact, to use `match_only` for references to existing
+types, to infer relationships only from evidence, and to output exactly one
+JSON object of the documented shape: no reasoning, no markdown. Dataset JSON
+is embedded with `<` and `>` escaped, so sample text cannot close the block.
+
+### Validation (two layers)
+
+1. **AI service (Pydantic)**: strict JSON only (no fences, no prose); unknown
+   fields rejected; machine-name patterns; confidences in `0..=1`; at most
+   25 entity types, 50 relationship types, 100 properties per type, 20
+   warnings of 300 characters; 256 KiB of model output.
+2. **Rust (authoritative)**: the same bounds; the ontology is built through
+   the domain constructors on top of the pinned base version; the base must
+   be preserved (no removed types or relationship types, no changed property
+   types, requiredness or endpoints, new properties of existing types
+   optional); the mapping must pass M4's `validate_mapping` against the
+   profile's fields. Rust also sets each annotation's `existing` flag itself.
+
+If Rust rejects a suggestion, the concise errors (never stack traces, SQL,
+paths, URLs or secrets) and the previous suggestion are sent back for at
+most `MINDGRAPH_AI_MAX_REPAIR_ATTEMPTS` (default 1, at most 2) repairs. Then
+the job fails with `AI_VALIDATION_FAILED`.
+
+### Provider calls
+
+- One provider kind, `openai_compatible` (hosted APIs, vLLM, Ollama's `/v1`,
+  llama.cpp server, gateways). `Authorization: Bearer` only when a key is
+  set; the key is never logged, returned or shown in `repr`.
+- Per-attempt timeout `MINDGRAPH_LLM_TIMEOUT_SECONDS` (60). Retries (at most
+  2, backoff 0.5 s, 1 s; `Retry-After` honoured up to 5 s) only for 429, 500,
+  502, 503, 504 and dropped connections. 400/401/403/404 and timeouts are not
+  retried.
+- `response_format: json_object` is requested when `MINDGRAPH_LLM_JSON_MODE`
+  is on, but correctness never depends on it.
+
+### Jobs
+
+`ai_suggest` reuses the M4 job table, executor and API:
+
+- **Executor**: M4's dispatcher became a generic `JobExecutor` with one
+  handler per job kind; all kinds share the bounded queue and
+  `MINDGRAPH_JOB_CONCURRENCY`.
+- **Idempotency**: required `Idempotency-Key`; the same key for the same data
+  source returns the original job without another provider call; another
+  data source or job kind is `409`.
+- **Pinning**: the active ontology version is stored on the job; the worker
+  loads exactly that version, and the result records it as
+  `ontology_version_base`.
+- **Result**: prompt version, provider, model, base version, repair count
+  and the validated suggestion. Never the prompt, raw provider output or
+  reasoning (migration `20261103140000_m5_graph_builder.sql`, result capped
+  at 512 KiB).
+- **Restart**: `ai_suggest` jobs left `queued` or `running` fail with
+  `PROCESS_RESTARTED`, like every other kind.
+- **Preflight** (`503 AI_NOT_CONFIGURED` / `AI_UNAVAILABLE`, `409` if the data
+  source is not analysed) runs before a job is created.
+
+### Graph Builder UI
+
+`/graphs/{graph_id}/builder` (Next.js client component). Steps: Data
+(upload), Analyze (profile table), AI Model (suggest or build manually),
+Review (entities and relationships with confidence bands and
+Existing/New badges, warnings; edit names, properties, types, required,
+identity, source fields, modes, endpoints; add and delete), Generate.
+**Generate Graph** validates the draft locally, re-checks that the ontology
+version has not changed, posts the ontology (skipped when unchanged), then
+posts the mapping as an ingestion with one idempotency key and follows the
+job. If the ingestion cannot start after the ontology was saved, the page
+says so and **Retry ingestion** reuses the same key without creating another
+ontology version. `/graphs/{graph_id}/explore` is a placeholder for M6.
+
+### Known M5 limitations
+
+- One provider kind (OpenAI-compatible); no streaming of model output.
+- Suggestions cover one dataset at a time and are not stored as reusable
+  drafts beyond the job result; the review draft lives in the browser tab.
+- The UI keeps the uploaded data source in page state: reloading the page
+  starts a new upload.
+- AI jobs share `MINDGRAPH_JOB_CONCURRENCY` with ingestion jobs.
+- Confidence values are the model's own estimates, not calibrated
+  probabilities.
+- `/ready` of core does not include the AI service (AI is optional); see
+  `GET /api/v1/graph-builder/status`.
+

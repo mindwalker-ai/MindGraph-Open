@@ -1,7 +1,12 @@
 //! Ontology use cases: the manual (non-AI) way to define a graph's schema.
 //!
-//! The AI Graph Builder (M5) will call the same service with suggested
-//! definitions; there is no separate AI persistence path.
+//! The AI Graph Builder (M5) produces an [`OntologyDefinition`] as a draft;
+//! after review it is submitted through this same service. There is no
+//! separate AI persistence path.
+//!
+//! The definition types serialise to the same JSON as the public
+//! `POST /api/v1/graphs/{graph_id}/ontology` request, so an AI draft can be
+//! reviewed and submitted unchanged.
 
 use std::sync::Arc;
 
@@ -9,36 +14,45 @@ use mindgraph_domain::{
     EntityType, EntityTypeId, GraphId, Ontology, PropertiesSchema, PropertyDefinition, PropertyKey,
     PropertyType, RelationshipType, RelationshipTypeId, TypeName, WorkspaceId,
 };
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::{ApplicationError, MetadataStore, MetadataStoreError};
 
 /// One property of a type definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PropertyInput {
     /// The property key, for example `customer_id`.
     pub name: String,
     /// The primitive type.
+    #[serde(rename = "type")]
     pub property_type: PropertyType,
     /// Whether every entity or relationship of the type must have it.
+    #[serde(default)]
     pub required: bool,
 }
 
 /// An entity type definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntityTypeInput {
     /// The type name, for example `Customer`.
     pub name: String,
     /// A human-readable name; defaults to `name`.
+    #[serde(default)]
     pub display_name: Option<String>,
     /// An optional description.
+    #[serde(default)]
     pub description: Option<String>,
     /// The properties.
+    #[serde(default)]
     pub properties: Vec<PropertyInput>,
 }
 
 /// A relationship type definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RelationshipTypeInput {
     /// The type name, for example `OWNS`.
     pub name: String,
@@ -47,17 +61,83 @@ pub struct RelationshipTypeInput {
     /// The target entity type name.
     pub target_entity_type: String,
     /// The properties.
+    #[serde(default)]
     pub properties: Vec<PropertyInput>,
 }
 
 /// The complete set of types of a new ontology version. It replaces the
 /// previous version's types; it is not a patch.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OntologyDefinition {
     /// The entity types.
     pub entity_types: Vec<EntityTypeInput>,
     /// The relationship types.
+    #[serde(default)]
     pub relationship_types: Vec<RelationshipTypeInput>,
+}
+
+fn properties_of(schema: &PropertiesSchema) -> Vec<PropertyInput> {
+    schema
+        .definitions()
+        .iter()
+        .map(|definition| PropertyInput {
+            name: definition.key.to_string(),
+            property_type: definition.property_type,
+            required: definition.required,
+        })
+        .collect()
+}
+
+impl OntologyDefinition {
+    /// The types of an existing ontology version, without ids.
+    #[must_use]
+    pub fn from_ontology(ontology: &Ontology) -> Self {
+        Self {
+            entity_types: ontology
+                .entity_types()
+                .iter()
+                .map(|entity_type| EntityTypeInput {
+                    name: entity_type.name().to_string(),
+                    display_name: Some(entity_type.display_name().to_owned()),
+                    description: entity_type.description().map(str::to_owned),
+                    properties: properties_of(entity_type.properties_schema()),
+                })
+                .collect(),
+            relationship_types: ontology
+                .relationship_types()
+                .iter()
+                .map(|relationship_type| RelationshipTypeInput {
+                    name: relationship_type.name().to_string(),
+                    source_entity_type: relationship_type.source_entity_type().to_string(),
+                    target_entity_type: relationship_type.target_entity_type().to_string(),
+                    properties: properties_of(relationship_type.properties_schema()),
+                })
+                .collect(),
+        }
+    }
+
+    /// Builds the next version of `base` from this definition, validating
+    /// every name and reference through the domain constructors. Nothing is
+    /// stored.
+    ///
+    /// # Errors
+    ///
+    /// [`ApplicationError::Validation`] for an invalid definition.
+    pub fn build_next_version(&self, base: &Ontology) -> Result<Ontology, ApplicationError> {
+        let graph_id = base.graph_id();
+        let entity_types = self
+            .entity_types
+            .iter()
+            .map(|input| entity_type(graph_id, input))
+            .collect::<Result<_, _>>()?;
+        let relationship_types = self
+            .relationship_types
+            .iter()
+            .map(|input| relationship_type(graph_id, input))
+            .collect::<Result<_, _>>()?;
+        Ok(base.next_version(entity_types, relationship_types)?)
+    }
 }
 
 /// Creates ontology versions.
@@ -158,17 +238,7 @@ impl OntologyService {
                     "graph {graph_id} has no active ontology"
                 )))
             })?;
-        let entity_types = definition
-            .entity_types
-            .iter()
-            .map(|input| entity_type(graph_id, input))
-            .collect::<Result<_, _>>()?;
-        let relationship_types = definition
-            .relationship_types
-            .iter()
-            .map(|input| relationship_type(graph_id, input))
-            .collect::<Result<_, _>>()?;
-        let ontology = active.next_version(entity_types, relationship_types)?;
+        let ontology = definition.build_next_version(&active)?;
         self.metadata
             .create_and_activate_ontology(&ontology)
             .await

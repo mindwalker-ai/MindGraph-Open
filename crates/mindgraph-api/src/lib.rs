@@ -15,6 +15,9 @@
 //! GET  /api/v1/graphs/{graph_id}/data-sources/{id}       read, with profile
 //! POST /api/v1/graphs/{graph_id}/data-sources/{id}/analyze      202 + job
 //! POST /api/v1/graphs/{graph_id}/data-sources/{id}/ingestions   202 + job (Idempotency-Key)
+//! POST /api/v1/graphs/{graph_id}/data-sources/{id}/graph-builder/suggestions
+//!                                           202 + AI suggestion job (Idempotency-Key)
+//! GET  /api/v1/graph-builder/status         is the AI Graph Builder available?
 //! GET  /api/v1/jobs/{job_id}                read a job
 //! GET  /api/v1/jobs/{job_id}/events         job progress as Server-Sent Events
 //! ```
@@ -29,7 +32,7 @@ mod error;
 mod request_context;
 mod routes;
 
-pub use config::{Config, ConfigError, DatabaseConfig, HugeGraphSettings};
+pub use config::{AiSettings, Config, ConfigError, DatabaseConfig, HugeGraphSettings};
 pub use routes::{AppState, router};
 
 /// The service name reported by the health check.

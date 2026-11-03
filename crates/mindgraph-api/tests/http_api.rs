@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use mindgraph_api::{AppState, router};
 use mindgraph_core::{
     DataSourceRecord, GraphProjectService, IngestionConfig, IngestionJob, IngestionPorts,
-    IngestionService, JobError, MemoryMetadataStore, MetadataStore, MetadataStoreError,
+    IngestionService, JobError, JobResult, MemoryMetadataStore, MetadataStore, MetadataStoreError,
     OntologyService,
 };
 use mindgraph_domain::{
@@ -20,7 +20,7 @@ use mindgraph_domain::{
     Workspace, WorkspaceId,
 };
 use mindgraph_graph::MemoryGraphStore;
-use mindgraph_ingestion::{DatasetProfile, IngestionSummary, MemorySourceStore};
+use mindgraph_ingestion::{DatasetProfile, MemorySourceStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -467,7 +467,7 @@ impl MetadataStore for FailingStore {
     async fn complete_job(
         &self,
         _: IngestionJobId,
-        _: Option<&IngestionSummary>,
+        _: Option<&JobResult>,
     ) -> Result<IngestionJob, MetadataStoreError> {
         Err(self.error())
     }

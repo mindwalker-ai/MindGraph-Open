@@ -9,9 +9,9 @@ use mindgraph_domain::{
     DataSource, DataSourceId, GraphId, GraphProject, IngestionJobId, Ontology, OntologyVersion,
     Workspace, WorkspaceId,
 };
-use mindgraph_ingestion::{DatasetProfile, IngestionSummary};
+use mindgraph_ingestion::DatasetProfile;
 
-use crate::{IngestionJob, JobError};
+use crate::{IngestionJob, JobError, JobResult};
 
 /// The name given to the local workspace when it is first created.
 pub const LOCAL_WORKSPACE_NAME: &str = "Local";
@@ -282,11 +282,13 @@ pub trait MetadataStore: Send + Sync {
     /// # Errors
     ///
     /// [`NotFound`](MetadataStoreError::NotFound) or
-    /// [`Conflict`](MetadataStoreError::Conflict) if the job is not running.
+    /// [`Conflict`](MetadataStoreError::Conflict) if the job is not running,
+    /// and [`InvalidInput`](MetadataStoreError::InvalidInput) for a result
+    /// of another job kind.
     async fn complete_job(
         &self,
         id: IngestionJobId,
-        result: Option<&IngestionSummary>,
+        result: Option<&JobResult>,
     ) -> Result<IngestionJob, MetadataStoreError>;
 
     /// `queued | running → failed`, recording the error. Progress is kept.

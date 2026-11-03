@@ -3,10 +3,11 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use mindgraph_core::{
-    DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY, DEFAULT_MAX_UPLOAD_BYTES, IngestionConfig,
-    MAX_BATCH_SIZE,
+    DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY, DEFAULT_MAX_UPLOAD_BYTES, GraphBuilderConfig,
+    IngestionConfig, MAX_BATCH_SIZE, MAX_REPAIR_ATTEMPTS,
 };
 use mindgraph_ingestion::Limits;
 
@@ -21,6 +22,9 @@ const MAX_UPLOAD_BYTES_VAR: &str = "MINDGRAPH_MAX_UPLOAD_BYTES";
 const MAX_RECORDS_VAR: &str = "MINDGRAPH_MAX_INGESTION_RECORDS";
 const BATCH_SIZE_VAR: &str = "MINDGRAPH_INGESTION_BATCH_SIZE";
 const JOB_CONCURRENCY_VAR: &str = "MINDGRAPH_JOB_CONCURRENCY";
+const AI_URL_VAR: &str = "MINDGRAPH_AI_URL";
+const AI_TIMEOUT_VAR: &str = "MINDGRAPH_AI_TIMEOUT_SECONDS";
+const AI_REPAIR_VAR: &str = "MINDGRAPH_AI_MAX_REPAIR_ATTEMPTS";
 
 /// Local-first default: only reachable from this machine. Docker Compose
 /// overrides it with `0.0.0.0:8080` inside the container network.
@@ -33,6 +37,8 @@ const MAX_MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_MAX_RECORDS: u64 = 100_000;
 const MAX_MAX_RECORDS: u64 = 10_000_000;
 const MAX_JOB_CONCURRENCY: usize = 16;
+const DEFAULT_AI_TIMEOUT_SECONDS: u64 = 300;
+const MAX_AI_TIMEOUT_SECONDS: u64 = 900;
 
 /// Configuration of the `mindgraph-core` process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +53,37 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Upload, record, batch and concurrency bounds.
     pub ingestion: IngestionConfig,
+    /// The internal AI service (optional: AI is disabled without it).
+    pub ai: AiSettings,
+}
+
+/// Settings of the internal AI service. Its URL is internal infrastructure,
+/// so `Debug` does not print it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiSettings {
+    url: Option<String>,
+    /// Time allowed for one suggestion call.
+    pub timeout: Duration,
+    /// Repair attempts after Rust rejects a suggestion (`0..=2`).
+    pub max_repair_attempts: u32,
+}
+
+impl AiSettings {
+    /// The base URL of the AI service, or `None` when AI is disabled.
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+}
+
+impl fmt::Debug for AiSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiSettings")
+            .field("enabled", &self.url.is_some())
+            .field("timeout", &self.timeout)
+            .field("max_repair_attempts", &self.max_repair_attempts)
+            .finish()
+    }
 }
 
 /// HugeGraph settings. `Debug` never prints the URL, which may contain
@@ -255,6 +292,30 @@ impl Config {
             )?),
             ..defaults
         };
+        let max_repair_attempts = match lookup(AI_REPAIR_VAR) {
+            None => GraphBuilderConfig::default().max_repair_attempts,
+            Some(raw) => raw
+                .trim()
+                .parse()
+                .ok()
+                .filter(|value| *value <= MAX_REPAIR_ATTEMPTS)
+                .ok_or(ConfigError::OutOfRange {
+                    name: AI_REPAIR_VAR,
+                    min: 0,
+                    max: u64::from(MAX_REPAIR_ATTEMPTS),
+                    value: raw,
+                })?,
+        };
+        let ai = AiSettings {
+            url: optional_text(&lookup, AI_URL_VAR),
+            timeout: Duration::from_secs(number(
+                &lookup,
+                AI_TIMEOUT_VAR,
+                DEFAULT_AI_TIMEOUT_SECONDS,
+                MAX_AI_TIMEOUT_SECONDS,
+            )?),
+            max_repair_attempts,
+        };
 
         Ok(Self {
             bind_addr,
@@ -265,6 +326,7 @@ impl Config {
             hugegraph,
             data_dir,
             ingestion,
+            ai,
         })
     }
 }
@@ -343,6 +405,42 @@ mod tests {
             (BATCH_SIZE_VAR, "5001"),
             (JOB_CONCURRENCY_VAR, "17"),
             (MAX_RECORDS_VAR, "many"),
+        ] {
+            assert!(
+                matches!(
+                    config(&[(DATABASE_URL_VAR, URL), (name, bad)]),
+                    Err(ConfigError::OutOfRange { .. })
+                ),
+                "{name}={bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_is_optional_and_bounded() {
+        let defaults = config(&[(DATABASE_URL_VAR, URL)]).unwrap();
+        assert_eq!(
+            defaults.ai.url(),
+            None,
+            "AI is disabled without MINDGRAPH_AI_URL"
+        );
+        assert_eq!(defaults.ai.timeout, Duration::from_secs(300));
+        assert_eq!(defaults.ai.max_repair_attempts, 1);
+        let configured = config(&[
+            (DATABASE_URL_VAR, URL),
+            (AI_URL_VAR, "http://ai:8000"),
+            (AI_TIMEOUT_VAR, "60"),
+            (AI_REPAIR_VAR, "0"),
+        ])
+        .unwrap();
+        assert_eq!(configured.ai.url(), Some("http://ai:8000"));
+        assert_eq!(configured.ai.timeout, Duration::from_secs(60));
+        assert_eq!(configured.ai.max_repair_attempts, 0);
+        assert!(!format!("{:?}", configured.ai).contains("ai:8000"));
+        for (name, bad) in [
+            (AI_REPAIR_VAR, "3"),
+            (AI_TIMEOUT_VAR, "0"),
+            (AI_TIMEOUT_VAR, "901"),
         ] {
             assert!(
                 matches!(

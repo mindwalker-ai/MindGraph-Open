@@ -1,19 +1,27 @@
 @import "tailwindcss";
 
 /*
- * Dark-first design tokens (PRD §29). These are placeholders until the
- * Graph Explorer design from the Pen.dev mockup is implemented in M6.
+ * Dark-first design tokens: technical, compact, investigative. The Graph
+ * Explorer (M6) builds on the same tokens.
  */
 :root {
   --background: #0a0b0f;
+  --panel: #10121a;
   --foreground: #e6e8ee;
   --muted: #8a8f9c;
   --border: #22252e;
   --accent: #3b6cf6;
+  --success: #3fb27f;
+  --warning: #d9a441;
+  --danger: #e5484d;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-panel: var(--panel);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-border: var(--border);

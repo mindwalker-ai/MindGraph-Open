@@ -6,14 +6,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use mindgraph_core::{
-    DataSourceRecord, IngestionJob, JobError, LOCAL_WORKSPACE_NAME, MetadataStore,
+    DataSourceRecord, IngestionJob, JobError, JobResult, LOCAL_WORKSPACE_NAME, MetadataStore,
     MetadataStoreError,
 };
 use mindgraph_domain::{
     DataSource, DataSourceId, GraphId, GraphProject, IngestionJobId, Ontology, OntologyVersion,
     Workspace, WorkspaceId,
 };
-use mindgraph_ingestion::{DatasetProfile, IngestionSummary};
+use mindgraph_ingestion::DatasetProfile;
 use serde_json::Value;
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
@@ -598,7 +598,7 @@ impl MetadataStore for PostgresMetadataStore {
     async fn complete_job(
         &self,
         id: IngestionJobId,
-        result: Option<&IngestionSummary>,
+        result: Option<&JobResult>,
     ) -> Result<IngestionJob, MetadataStoreError> {
         self.complete_job_row(id, result).await
     }
