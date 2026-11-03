@@ -13,6 +13,7 @@ async-trait.workspace = true
 chrono.workspace = true
 mindgraph-core.workspace = true
 mindgraph-domain.workspace = true
+mindgraph-ingestion.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

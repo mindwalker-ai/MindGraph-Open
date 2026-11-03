@@ -48,6 +48,7 @@
 
 #![warn(missing_docs)]
 
+mod data_source;
 mod entity;
 mod entity_type;
 mod error;
@@ -62,11 +63,15 @@ mod schema;
 mod text;
 mod workspace;
 
+pub use data_source::{DataSource, DataSourceKind, DataSourceStatus};
 pub use entity::Entity;
 pub use entity_type::EntityType;
 pub use error::DomainError;
 pub use graph_project::{GraphProject, GraphStatus};
-pub use id::{EntityId, EntityTypeId, GraphId, RelationshipId, RelationshipTypeId, WorkspaceId};
+pub use id::{
+    DataSourceId, EntityId, EntityTypeId, GraphId, IngestionJobId, RelationshipId,
+    RelationshipTypeId, WorkspaceId,
+};
 pub use name::{PropertyKey, TypeName};
 pub use ontology::{Ontology, OntologyVersion};
 pub use property::{Properties, PropertyType, PropertyValue};

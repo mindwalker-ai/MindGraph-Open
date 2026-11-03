@@ -1,6 +1,9 @@
 # Rust
 /target/
 
+# Uploaded datasets of a host-run mindgraph-core (MINDGRAPH_DATA_DIR default)
+/data/
+
 # Node / Next.js
 node_modules/
 .next/

@@ -157,6 +157,18 @@ define_id!(
     "relationship id"
 );
 
+define_id!(
+    /// Identifies a [`DataSource`](crate::DataSource): one uploaded dataset file.
+    DataSourceId,
+    "data source id"
+);
+
+define_id!(
+    /// Identifies an ingestion or analysis job.
+    IngestionJobId,
+    "ingestion job id"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

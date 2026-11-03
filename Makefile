@@ -108,9 +108,11 @@ hugegraph-test-up: ## Start a throwaway HugeGraph 1.7 on 127.0.0.1:18080 for liv
 hugegraph-test-down: ## Stop the throwaway HugeGraph (its data is discarded)
 	$(CONTAINER) rm -f mindgraph-hugegraph-test
 
-test-hugegraph: ## Run the GraphStore contract against a live HugeGraph (see hugegraph-test-up)
+test-hugegraph: ## Run the GraphStore contract and the M4 ingestion flow against a live HugeGraph (see hugegraph-test-up)
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
+	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
+		cargo test -p mindgraph-api --test hugegraph_ingestion --locked -- --ignored
 
 # --- Live PostgreSQL integration tests (opt-in) ------------------------------
 

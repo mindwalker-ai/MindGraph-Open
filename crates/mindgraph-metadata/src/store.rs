@@ -5,8 +5,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
-use mindgraph_core::{LOCAL_WORKSPACE_NAME, MetadataStore, MetadataStoreError};
-use mindgraph_domain::{GraphId, GraphProject, Ontology, OntologyVersion, Workspace, WorkspaceId};
+use mindgraph_core::{
+    DataSourceRecord, IngestionJob, JobError, LOCAL_WORKSPACE_NAME, MetadataStore,
+    MetadataStoreError,
+};
+use mindgraph_domain::{
+    DataSource, DataSourceId, GraphId, GraphProject, IngestionJobId, Ontology, OntologyVersion,
+    Workspace, WorkspaceId,
+};
+use mindgraph_ingestion::{DatasetProfile, IngestionSummary};
 use serde_json::Value;
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
@@ -99,6 +106,10 @@ impl PostgresMetadataStore {
         Self { pool }
     }
 
+    pub(crate) const fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Applies any pending embedded migrations. Safe to call on every start;
     /// concurrent callers are serialised by SQLx's migration lock.
     ///
@@ -120,7 +131,7 @@ impl PostgresMetadataStore {
 
 /// Maps a SQLx error to a store error. Messages never include connection
 /// strings or row values.
-fn map_error(context: &str, err: sqlx::Error) -> MetadataStoreError {
+pub(crate) fn map_error(context: &str, err: sqlx::Error) -> MetadataStoreError {
     enum Kind {
         Conflict,
         NotFound,
@@ -176,17 +187,17 @@ fn map_error(context: &str, err: sqlx::Error) -> MetadataStoreError {
     }
 }
 
-fn corrupt(what: &str, err: impl fmt::Display) -> MetadataStoreError {
+pub(crate) fn corrupt(what: &str, err: impl fmt::Display) -> MetadataStoreError {
     MetadataStoreError::CorruptData(format!("{what}: {err}"))
 }
 
-fn version_column(version: OntologyVersion) -> Result<i32, MetadataStoreError> {
+pub(crate) fn version_column(version: OntologyVersion) -> Result<i32, MetadataStoreError> {
     i32::try_from(version.get()).map_err(|_| {
         MetadataStoreError::InvalidInput(format!("ontology version {version} is too large"))
     })
 }
 
-fn version_from_column(value: i32) -> Result<OntologyVersion, MetadataStoreError> {
+pub(crate) fn version_from_column(value: i32) -> Result<OntologyVersion, MetadataStoreError> {
     u32::try_from(value)
         .map_err(|_| corrupt("ontology version", value))
         .and_then(|value| {
@@ -394,6 +405,52 @@ impl MetadataStore for PostgresMetadataStore {
         })
     }
 
+    async fn create_and_activate_ontology(
+        &self,
+        ontology: &Ontology,
+    ) -> Result<(), MetadataStoreError> {
+        let graph_id = ontology.graph_id();
+        let version = ontology.version();
+        let column = version_column(version)?;
+        let schema = codec::encode(ontology)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| map_error("starting a transaction", err))?;
+        sqlx::query(
+            "INSERT INTO ontology_versions (graph_id, version, schema_json) VALUES ($1, $2, $3)",
+        )
+        .bind(graph_id.as_uuid())
+        .bind(column)
+        .bind(&schema)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| match map_error("creating an ontology version", err) {
+            MetadataStoreError::NotFound(_) => {
+                MetadataStoreError::NotFound(format!("graph {graph_id}"))
+            }
+            MetadataStoreError::Conflict(_) => MetadataStoreError::Conflict(format!(
+                "ontology {version} of graph {graph_id} already exists"
+            )),
+            other => other,
+        })?;
+        sqlx::query(
+            "UPDATE graph_projects \
+             SET active_ontology_version = $2, updated_at = GREATEST(updated_at, $3) \
+             WHERE id = $1",
+        )
+        .bind(graph_id.as_uuid())
+        .bind(column)
+        .bind(Utc::now().trunc_subsecs(6))
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| map_error("activating an ontology version", err))?;
+        tx.commit()
+            .await
+            .map_err(|err| map_error("committing the ontology version", err))
+    }
+
     async fn get_ontology(
         &self,
         graph_id: GraphId,
@@ -467,6 +524,98 @@ impl MetadataStore for PostgresMetadataStore {
             return Err(MetadataStoreError::NotFound(format!("graph {graph_id}")));
         }
         Ok(())
+    }
+
+    async fn activate_graph(&self, id: GraphId) -> Result<GraphProject, MetadataStoreError> {
+        self.activate_graph_row(id).await
+    }
+
+    async fn create_data_source(
+        &self,
+        data_source: &DataSource,
+        storage_key: &str,
+    ) -> Result<(), MetadataStoreError> {
+        self.insert_data_source(data_source, storage_key).await
+    }
+
+    async fn get_data_source(
+        &self,
+        graph_id: GraphId,
+        id: DataSourceId,
+    ) -> Result<Option<DataSourceRecord>, MetadataStoreError> {
+        self.select_data_source(graph_id, id).await
+    }
+
+    async fn mark_data_source_ready(
+        &self,
+        graph_id: GraphId,
+        id: DataSourceId,
+        profile: &DatasetProfile,
+    ) -> Result<DataSource, MetadataStoreError> {
+        self.set_data_source_profile(graph_id, id, Some(profile))
+            .await
+    }
+
+    async fn mark_data_source_failed(
+        &self,
+        graph_id: GraphId,
+        id: DataSourceId,
+    ) -> Result<DataSource, MetadataStoreError> {
+        self.set_data_source_profile(graph_id, id, None).await
+    }
+
+    async fn create_job(&self, job: &IngestionJob) -> Result<(), MetadataStoreError> {
+        self.insert_job(job).await
+    }
+
+    async fn get_job(
+        &self,
+        id: IngestionJobId,
+    ) -> Result<Option<IngestionJob>, MetadataStoreError> {
+        self.select_job(id).await
+    }
+
+    async fn find_job_by_idempotency_key(
+        &self,
+        graph_id: GraphId,
+        key: &str,
+    ) -> Result<Option<IngestionJob>, MetadataStoreError> {
+        self.select_job_by_key(graph_id, key).await
+    }
+
+    async fn start_job(&self, id: IngestionJobId) -> Result<IngestionJob, MetadataStoreError> {
+        self.start_job_row(id).await
+    }
+
+    async fn update_job_progress(
+        &self,
+        id: IngestionJobId,
+        progress: f64,
+    ) -> Result<(), MetadataStoreError> {
+        self.update_progress_row(id, progress).await
+    }
+
+    async fn complete_job(
+        &self,
+        id: IngestionJobId,
+        result: Option<&IngestionSummary>,
+    ) -> Result<IngestionJob, MetadataStoreError> {
+        self.complete_job_row(id, result).await
+    }
+
+    async fn fail_job(
+        &self,
+        id: IngestionJobId,
+        error: &JobError,
+    ) -> Result<IngestionJob, MetadataStoreError> {
+        self.fail_job_row(id, error).await
+    }
+
+    async fn mark_incomplete_jobs_failed(
+        &self,
+        error: &JobError,
+    ) -> Result<u64, MetadataStoreError> {
+        self.fail_incomplete_jobs(error).await
     }
 
     async fn ping(&self) -> Result<(), MetadataStoreError> {

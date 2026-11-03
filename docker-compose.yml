@@ -40,21 +40,31 @@ services:
       - "127.0.0.1:${MINDGRAPH_CORE_PORT:-8080}:8080"
     environment:
       MINDGRAPH_CORE_BIND_ADDR: 0.0.0.0:8080
-      # Required: core fails fast if PostgreSQL is unreachable and the
-      # restart policy retries. HugeGraph and AI URLs are used from M4/M5.
+      # Required: core fails fast if PostgreSQL or HugeGraph is unreachable
+      # (it creates the HugeGraph schema at startup) and the restart policy
+      # retries. The AI URL is used from M5; M4 never calls it.
       MINDGRAPH_DATABASE_URL: postgres://${MINDGRAPH_POSTGRES_USER:-mindgraph}:${MINDGRAPH_POSTGRES_PASSWORD:-mindgraph}@postgres:5432/${MINDGRAPH_POSTGRES_DB:-mindgraph}
       MINDGRAPH_DATABASE_MAX_CONNECTIONS: ${MINDGRAPH_DATABASE_MAX_CONNECTIONS:-10}
       MINDGRAPH_HUGEGRAPH_URL: http://hugegraph:8080
+      # M4 dataset ingestion: uploaded files live in the mindgraph-data volume.
+      MINDGRAPH_DATA_DIR: /data
+      MINDGRAPH_MAX_UPLOAD_BYTES: ${MINDGRAPH_MAX_UPLOAD_BYTES:-52428800}
+      MINDGRAPH_MAX_INGESTION_RECORDS: ${MINDGRAPH_MAX_INGESTION_RECORDS:-100000}
+      MINDGRAPH_INGESTION_BATCH_SIZE: ${MINDGRAPH_INGESTION_BATCH_SIZE:-500}
+      MINDGRAPH_JOB_CONCURRENCY: ${MINDGRAPH_JOB_CONCURRENCY:-2}
       MINDGRAPH_AI_URL: http://ai:8000
       MINDGRAPH_TELEMETRY_ENABLED: ${MINDGRAPH_TELEMETRY_ENABLED:-false}
       RUST_LOG: ${RUST_LOG:-info}
     # Core deliberately does not depend on `ai`: graph features must keep
     # working when the AI service is unavailable (ADR-007).
+    # Source files survive restarts; they are never served over HTTP.
+    volumes:
+      - mindgraph-data:/data
     depends_on:
       postgres:
         condition: service_healthy
       hugegraph:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 10s
@@ -123,3 +133,4 @@ services:
 volumes:
   postgres-data:
   hugegraph-data:
+  mindgraph-data:

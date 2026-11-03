@@ -12,11 +12,26 @@ publish.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 mindgraph-domain.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
+
+[features]
+default = ["hugegraph"]
+# The Apache HugeGraph 1.7 adapter. Off for crates that need only the
+# GraphStore port (mindgraph-core, mindgraph-ingestion), so they do not pull
+# in an HTTP client (ADR-002 dependency boundary).
+hugegraph = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
+[[test]]
+name = "hugegraph_adapter"
+required-features = ["hugegraph"]
+
+[[test]]
+name = "hugegraph_integration"
+required-features = ["hugegraph"]
 
 [dev-dependencies]
 tokio.workspace = true

@@ -158,7 +158,12 @@ CI runs the same suite in the `hugegraph-integration` job. Plain
 
 - Exact property search scans the graph's (or type's) candidates by index
   and filters `mg_properties` in Rust. Scans are capped at 100,000
-  candidates.
+  candidates. Dataset ingestion therefore batches identity lookups with
+  `EntitySearch::with_any_of` (one scan per type and batch, see M4 below).
+- HugeGraph 1.7 repeats the last vertex of a page as the first vertex of
+  the next page when paging a property-filtered query. The adapter keeps
+  each vertex once, by id (fixed in M4; covered by the contract case
+  `search_pages_through_large_types_exactly_once`).
 - Generic physical schema: no per-ontology HugeGraph labels or property
   indexes.
 - No pagination abstraction, full-text, fuzzy or vector search.
@@ -201,8 +206,8 @@ HTTP ── mindgraph-api ── GraphProjectService (mindgraph-core)
   constructors, so bad data is reported as `CorruptData`.
 - **Baseline tables** for M4+: `data_sources`, `ingestion_jobs` (states
   `queued|running|completed|failed|cancelled`, unique
-  `(graph_id, idempotency_key)`), `saved_views`. They have no application
-  logic yet.
+  `(graph_id, idempotency_key)`), `saved_views`. M4 extends the first two
+  with an append-only migration (see below); `saved_views` is still unused.
 - Timestamps are stored with microsecond precision. The application
   truncates to microseconds when it creates records, so API responses before
   and after a round trip are identical.
@@ -211,3 +216,199 @@ The `MetadataStore` contract is enforced by a shared suite
 (`crates/mindgraph-metadata/tests/contract`) that runs against the memory
 store on every `cargo test` and against PostgreSQL 17 with
 `make test-postgres` and in CI. Each PostgreSQL test runs in a fresh database.
+
+## Dataset ingestion (ADR-008, M4)
+
+The deterministic dataset engine: upload a CSV or flat JSON file, profile
+it, define an ontology by hand, map fields to it, and ingest. No LLM and no
+Python service is involved; M5's AI Graph Builder will suggest ontologies
+and mappings and then call these same services.
+
+```text
+HTTP (mindgraph-api, transport only: multipart, headers, SSE)
+  │
+  ▼
+OntologyService ── create_and_activate_ontology ──┐
+IngestionService (mindgraph-core)                 │  MetadataStore (PostgreSQL):
+  │ upload ─► SourceStore (LocalSourceStore)      ├─ data_sources, ingestion_jobs,
+  │ jobs   ─► bounded queue ─► semaphore workers  │  ontology_versions
+  │              │                                │
+  │              ▼                                │
+  │   mindgraph-ingestion: read ─► profile        │
+  │                        mapping ─► validate ─► preflight ─► batched writes
+  │                                                              │
+  ▼                                                              ▼
+SourceStore (<data dir>/sources/<id>/source)          GraphStore (HugeGraphStore)
+```
+
+Ownership stays with the ports: `MetadataStore` owns control-plane state,
+`GraphStore` owns graph data, `SourceStore` owns file bytes. Handlers never
+see a database pool, a HugeGraph client or a filesystem path.
+
+### `mindgraph-ingestion`
+
+| Module      | Contents                                                                 |
+| ----------- | ------------------------------------------------------------------------ |
+| `record`    | Streaming CSV (header row, strict column count) and JSON (top-level array of flat objects, read element by element) readers; `Limits` |
+| `profile`   | `DatasetProfile` / `FieldProfile`, type inference and widening           |
+| `mapping`   | The `IngestionMapping` contract, `validate_mapping`, value conversion    |
+| `source`    | `SourceStore` / `SourceWriter`, `LocalSourceStore`, `MemorySourceStore`, `UploadDigest` (SHA-256) |
+| `engine`    | `run_ingestion`: preflight pass, identity resolution, batched writes     |
+| `error`     | `IngestionError` with stable codes; messages never contain values        |
+
+It depends on `mindgraph-domain` and the `GraphStore` port of
+`mindgraph-graph` only (built without the `hugegraph` feature, so no HTTP
+client). `csv::Error`, `std::io::Error` and `serde_json::Error` are kept as
+sources, never exposed.
+
+### Type inference
+
+| Input           | Rule                                                                         |
+| --------------- | ---------------------------------------------------------------------------- |
+| CSV blank       | null (never `""`, `0` or `false`)                                            |
+| CSV text        | `true`/`false` (any case) → boolean; leading-zero number (`00123`) → **string**; `i64` → integer; finite decimal → float; RFC 3339 → datetime; else string |
+| JSON values     | boolean, integer, float, string (RFC 3339 → datetime), array of strings → string_array; strings are never re-read as numbers; nested objects or non-string arrays are rejected |
+| Widening        | null never changes the type; integer + float → float; any other mix → string; no value at all → string |
+
+The profile keeps at most 20 sample rows and 5 distinct sample values per
+field (each truncated to 200 characters), because the UI needs a preview.
+This is the only place dataset values are stored in PostgreSQL.
+
+### Mapping contract
+
+```json
+{"entities": [{"alias": "account", "entity_type": "Account", "mode": "create_or_match",
+               "identity": [{"source_field": "account_id", "property": "account_id"}],
+               "properties": [{"source_field": "account_id", "property": "account_id"}]},
+              {"alias": "customer", "entity_type": "Customer", "mode": "match_only",
+               "identity": [{"source_field": "customer_id", "property": "customer_id"}],
+               "properties": []}],
+ "relationships": [{"relationship_type": "OWNS", "source": "customer", "target": "account",
+                    "properties": []}]}
+```
+
+Validation runs before a job exists: unique aliases, existing source
+fields, entity and relationship types of the active ontology, existing
+target properties, at least one identity field, identity properties also
+mapped (for `create_or_match`), every required property mapped, no
+properties on `match_only`, and relationship endpoints whose alias types
+match the ontology. The ontology property type decides conversion; CSV
+arrays are not split (string arrays only come from JSON).
+
+### Jobs
+
+- **States** `queued → running → completed | failed`, and `queued → failed`
+  (restart recovery). Guarded `UPDATE … WHERE status = …` statements make
+  other transitions a conflict; database constraints back them up
+  (`failed` ⇔ error, `completed` ⇒ progress 1, ingest ⇔ pinned version).
+- **Executor**: in-process Tokio. A bounded queue (256) feeds a dispatcher
+  that runs at most `MINDGRAPH_JOB_CONCURRENCY` jobs at a time (semaphore).
+  The queue slot is reserved before the job row is written, so a full queue
+  stores nothing (`503`). A panicking job is recorded as failed.
+- **Per-graph serialisation**: ingestion jobs of the same graph run one at a
+  time, so two jobs cannot both miss an identity and create it twice.
+- **Ontology pinning**: the active version is stored on the job at
+  submission; the worker loads exactly that version.
+- **Idempotency**: `Idempotency-Key` is unique per graph in PostgreSQL. The
+  same key with the same data source and mapping returns the original job
+  (also after a restart); with a different request it is `409`.
+- **Progress** is persisted per batch (ingestion) or per 1,000 records
+  (analysis, by bytes read), never per row, and never decreases. SSE polls
+  the persisted state every 500 ms and emits only changes.
+- **Restart recovery**: at startup, before serving, every `queued` or
+  `running` job is marked `failed` with `PROCESS_RESTARTED`. Jobs are not
+  resumed. This assumes one `mindgraph-core` process per database.
+
+### Graph writes
+
+1. **Preflight** streams the whole file and converts every record without
+   writing. Missing required values, unconvertible values or malformed rows
+   fail the job before the first graph mutation.
+2. **Write** streams the file again in batches (`MINDGRAPH_INGESTION_BATCH_SIZE`,
+   default 500). Uncached identities of a batch are resolved with one
+   `search_entities` call per entity type and batch (chunks of up to 999
+   identities, `EntitySearch::with_any_of`, exact matching by the
+   GraphStore); a truncated result falls back to one exact search per
+   identity. A type that
+   was empty when the job started needs no lookups. Results go into a
+   job-scoped identity cache, so a customer referenced by 1,000 rows is
+   looked up once and created at most once.
+3. Entities, then relationships, are written with `create_entities` /
+   `create_relationships`. Identical relationships (type, endpoints,
+   properties) are de-duplicated within a job; parallel relationships remain
+   possible across jobs.
+4. On success the graph moves `draft → active` (an archived graph is not
+   reactivated), then the job completes.
+
+Writes are **not transactional across batches or across PostgreSQL and
+HugeGraph**. If HugeGraph fails midway, earlier batches remain, the job
+fails with `GRAPH_UNAVAILABLE` / `GRAPH_STORE_ERROR`, and the message says
+nothing was rolled back. The graph is never cleared to "undo" a job.
+
+### Source storage
+
+`LocalSourceStore` writes `<MINDGRAPH_DATA_DIR>/sources/<data_source_id>/source`.
+Bytes stream into `.upload-<uuid>.tmp` in the same directory, are flushed and
+fsynced, and are renamed on commit; an abandoned upload's temporary file is
+removed. The user's filename is metadata only (validated, base name kept),
+so `../` and collisions cannot affect paths. Docker Compose mounts the
+`mindgraph-data` volume at `/data`. Failed analyses keep the file for
+diagnosis.
+
+### Bounds
+
+| Resource              | Bound                                                        |
+| --------------------- | ------------------------------------------------------------ |
+| Upload size           | `MINDGRAPH_MAX_UPLOAD_BYTES` (50 MiB), enforced while streaming |
+| Records per dataset   | `MINDGRAPH_MAX_INGESTION_RECORDS` (100,000)                   |
+| Fields per record     | 500                                                          |
+| Value size            | 64 KiB per value                                             |
+| Samples               | 20 rows, 5 values per field, 200 characters per value        |
+| Write batch           | `MINDGRAPH_INGESTION_BATCH_SIZE` (500, at most 5,000)        |
+| Running / queued jobs | `MINDGRAPH_JOB_CONCURRENCY` (2, at most 16) / 256            |
+| Job error messages    | 1,000 characters                                             |
+
+### Security
+
+Logs carry ids, kinds, sizes, record counts, codes and durations. They never
+contain file contents, sample rows, identity values, graph properties, full
+paths, database URLs or HugeGraph URLs (URLs with credentials are refused at
+startup). Error messages name record numbers and fields, never values;
+graph-store failures are reduced to their category.
+
+### Performance sanity check
+
+`crates/mindgraph-api/tests/ingestion_perf.rs` (ignored; run with
+`cargo test --release -p mindgraph-api --test ingestion_perf -- --ignored --nocapture`)
+ingests a generated 10,000-row `customers.csv` and a 10,000-row
+`accounts.csv` whose every row matches a different existing customer.
+Observed on a developer laptop (Apple Silicon, release build, HugeGraph 1.7
+in Podman):
+
+| Backend   | Analysis (10k rows) | customers.csv ingest | accounts.csv ingest (10k distinct lookups) |
+| --------- | ------------------- | -------------------- | ------------------------------------------ |
+| memory    | ~7–15 ms            | ~0.04 s              | ~1.2 s                                     |
+| HugeGraph | ~6–15 ms            | ~0.53 s              | ~5.2 s                                     |
+
+Before lookups were batched, 1,000 such rows took 119 s against HugeGraph
+(one full type scan per row). Not an SLA.
+
+### Known M4 limitations
+
+- Local filesystem source storage only (no S3 / MinIO); CSV and flat JSON
+  only (no nested objects, no CSV array splitting).
+- In-process workers; jobs do not resume after a restart (they fail with
+  `PROCESS_RESTARTED`); one `mindgraph-core` process per database.
+- No public cancellation endpoint (`cancelled` exists in the schema only).
+- Exact identity matching only: no fuzzy entity resolution (M9), no
+  automatic ontology or mapping suggestions (M5), no GraphRAG (M7).
+- No transaction across PostgreSQL and HugeGraph, nor across write batches.
+- Identity lookups on HugeGraph still scan the whole type once per batch
+  (properties are not indexed in M2's generic schema), so re-ingesting into
+  a type with ~100,000 existing entities is slow; per-property indexes or a
+  bulk identity index belong to a later milestone.
+- `/ready` checks PostgreSQL only; HugeGraph is checked (and its schema
+  created) at startup, which fails fast if it is unavailable.
+- A new ontology version replaces the whole type set; existing graph data is
+  not migrated or checked against it.
+

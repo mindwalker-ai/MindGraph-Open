@@ -137,6 +137,10 @@ impl HugeGraphStore {
     ) -> Result<Vec<Vertex>, GraphStoreError> {
         let filter = Value::Object(filter.clone()).to_string();
         let mut vertices = Vec::new();
+        // HugeGraph 1.7 repeats the last vertex of a page as the first one
+        // of the next page when paging a property-filtered query, so every
+        // vertex is kept once, by id.
+        let mut seen = BTreeSet::new();
         let mut page = String::new();
         loop {
             let query = [
@@ -146,7 +150,12 @@ impl HugeGraphStore {
                 ("limit", PAGE_SIZE.to_string()),
             ];
             let result: VertexPage = self.client.get(&["graph", "vertices"], &query).await?;
-            vertices.extend(result.vertices);
+            vertices.extend(
+                result
+                    .vertices
+                    .into_iter()
+                    .filter(|vertex| seen.insert(vertex.id.to_string())),
+            );
             if cap.is_some_and(|cap| vertices.len() > cap) {
                 return Err(too_many(cap.unwrap_or_default()));
             }

@@ -10,14 +10,37 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use mindgraph_api::{AppState, router};
-use mindgraph_core::{GraphProjectService, MemoryMetadataStore, MetadataStore, MetadataStoreError};
-use mindgraph_domain::{GraphId, GraphProject, Ontology, OntologyVersion, Workspace, WorkspaceId};
+use mindgraph_core::{
+    DataSourceRecord, GraphProjectService, IngestionConfig, IngestionJob, IngestionPorts,
+    IngestionService, JobError, MemoryMetadataStore, MetadataStore, MetadataStoreError,
+    OntologyService,
+};
+use mindgraph_domain::{
+    DataSource, DataSourceId, GraphId, GraphProject, IngestionJobId, Ontology, OntologyVersion,
+    Workspace, WorkspaceId,
+};
+use mindgraph_graph::MemoryGraphStore;
+use mindgraph_ingestion::{DatasetProfile, IngestionSummary, MemorySourceStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 async fn app_with(store: Arc<dyn MetadataStore>) -> Router {
+    let graph_projects = GraphProjectService::bootstrap(store.clone()).await.unwrap();
+    let workspace_id = graph_projects.workspace_id();
+    let ingestion = IngestionService::start(
+        IngestionPorts {
+            metadata: store.clone(),
+            graph: Arc::new(MemoryGraphStore::new()),
+            sources: Arc::new(MemorySourceStore::new()),
+        },
+        workspace_id,
+        IngestionConfig::default(),
+    )
+    .unwrap();
     router(AppState::new(
-        GraphProjectService::bootstrap(store).await.unwrap(),
+        graph_projects,
+        OntologyService::new(store, workspace_id),
+        ingestion,
     ))
 }
 
@@ -385,6 +408,77 @@ impl MetadataStore for FailingStore {
         _: GraphId,
         _: OntologyVersion,
     ) -> Result<(), MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn activate_graph(&self, _: GraphId) -> Result<GraphProject, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn create_and_activate_ontology(&self, _: &Ontology) -> Result<(), MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn create_data_source(&self, _: &DataSource, _: &str) -> Result<(), MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn get_data_source(
+        &self,
+        _: GraphId,
+        _: DataSourceId,
+    ) -> Result<Option<DataSourceRecord>, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn mark_data_source_ready(
+        &self,
+        _: GraphId,
+        _: DataSourceId,
+        _: &DatasetProfile,
+    ) -> Result<DataSource, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn mark_data_source_failed(
+        &self,
+        _: GraphId,
+        _: DataSourceId,
+    ) -> Result<DataSource, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn create_job(&self, _: &IngestionJob) -> Result<(), MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn get_job(&self, _: IngestionJobId) -> Result<Option<IngestionJob>, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn find_job_by_idempotency_key(
+        &self,
+        _: GraphId,
+        _: &str,
+    ) -> Result<Option<IngestionJob>, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn start_job(&self, _: IngestionJobId) -> Result<IngestionJob, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn update_job_progress(
+        &self,
+        _: IngestionJobId,
+        _: f64,
+    ) -> Result<(), MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn complete_job(
+        &self,
+        _: IngestionJobId,
+        _: Option<&IngestionSummary>,
+    ) -> Result<IngestionJob, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn fail_job(
+        &self,
+        _: IngestionJobId,
+        _: &JobError,
+    ) -> Result<IngestionJob, MetadataStoreError> {
+        Err(self.error())
+    }
+    async fn mark_incomplete_jobs_failed(&self, _: &JobError) -> Result<u64, MetadataStoreError> {
         Err(self.error())
     }
     async fn ping(&self) -> Result<(), MetadataStoreError> {

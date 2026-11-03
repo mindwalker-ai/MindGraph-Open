@@ -1,9 +1,39 @@
-//! Dataset ingestion for MindGraph Open (ADR-008).
+//! Deterministic dataset ingestion for MindGraph Open (ADR-008).
 //!
-//! Rust owns the whole ingestion path: CSV and JSON parsing, schema
-//! inspection, sampling, primitive type inference, mapping rows to entities
-//! and relationships, validation, and batched graph writes. The Python AI
-//! service only ever receives schema, statistics and representative samples,
-//! never full files.
+//! The engine underneath the (future, M5) AI Graph Builder. Everything here is
+//! Rust-native and works without an LLM or the Python AI service:
 //!
-//! Status: skeleton. Implemented in M4.
+//! ```text
+//! SourceStore ──► records (CSV / flat JSON, streamed) ──► DatasetProfile
+//!                         │
+//!                         ▼
+//!         IngestionMapping ──validate against Ontology──► ValidatedMapping
+//!                         │
+//!                         ▼
+//!     run_ingestion: preflight pass, then batched GraphStore writes
+//! ```
+//!
+//! Orchestration (jobs, metadata, progress persistence) lives in
+//! `mindgraph-core`; this crate has no dependency on it.
+
+#![warn(missing_docs)]
+
+mod engine;
+mod error;
+mod mapping;
+mod profile;
+mod record;
+mod source;
+
+pub use engine::{IngestionRun, IngestionSummary, ProgressSink, run_ingestion};
+pub use error::IngestionError;
+pub use mapping::{
+    EntityMapping, EntityMode, FieldMapping, IngestionMapping, RelationshipMapping,
+    ValidatedMapping, validate_mapping,
+};
+pub use profile::{
+    DatasetProfile, FieldProfile, MAX_SAMPLE_ROWS, MAX_SAMPLE_VALUES, infer_type, profile_dataset,
+    widen,
+};
+pub use record::{FieldValue, Limits};
+pub use source::{LocalSourceStore, MemorySourceStore, SourceStore, SourceWriter, UploadDigest};

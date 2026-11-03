@@ -1,6 +1,6 @@
 [package]
 name = "mindgraph-ingestion"
-description = "CSV and JSON dataset ingestion for MindGraph Open."
+description = "Deterministic CSV and JSON dataset ingestion engine for MindGraph Open."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,24 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# Rust-native only (ADR-008): no Python, no AI service.
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+csv.workspace = true
+hex.workspace = true
 mindgraph-domain.workspace = true
+mindgraph-graph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

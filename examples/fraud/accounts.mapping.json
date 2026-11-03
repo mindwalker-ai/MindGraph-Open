@@ -1,0 +1,33 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "account",
+        "entity_type": "Account",
+        "mode": "create_or_match",
+        "identity": [{ "source_field": "account_id", "property": "account_id" }],
+        "properties": [
+          { "source_field": "account_id", "property": "account_id" },
+          { "source_field": "account_type", "property": "account_type" },
+          { "source_field": "balance", "property": "balance" },
+          { "source_field": "opened_at", "property": "opened_at" }
+        ]
+      },
+      {
+        "alias": "customer",
+        "entity_type": "Customer",
+        "mode": "match_only",
+        "identity": [{ "source_field": "customer_id", "property": "customer_id" }],
+        "properties": []
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "OWNS",
+        "source": "customer",
+        "target": "account",
+        "properties": []
+      }
+    ]
+  }
+}
