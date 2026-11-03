@@ -40,6 +40,7 @@
 #![warn(missing_docs)]
 
 mod error;
+#[cfg(feature = "hugegraph")]
 mod hugegraph;
 mod memory;
 mod query;
@@ -47,6 +48,7 @@ mod store;
 mod validate;
 
 pub use error::GraphStoreError;
+#[cfg(feature = "hugegraph")]
 pub use hugegraph::{HugeGraphConfig, HugeGraphStore};
 pub use memory::MemoryGraphStore;
 pub use query::{

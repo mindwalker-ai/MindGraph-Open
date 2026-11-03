@@ -11,7 +11,9 @@ publish.workspace = true
 # The runtime process is called `mindgraph-core` (ADR-002). The binary lives
 # here, in the outermost layer, so dependencies keep pointing inward:
 # api -> core -> domain. This crate is also the composition root that wires
-# the PostgreSQL adapter (mindgraph-metadata) into the application layer.
+# the adapters into the application layer: PostgreSQL (mindgraph-metadata),
+# HugeGraph (mindgraph-graph, `hugegraph` feature) and local source storage
+# (mindgraph-ingestion).
 [[bin]]
 name = "mindgraph-core"
 path = "src/main.rs"
@@ -19,8 +21,11 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 mindgraph-core.workspace = true
 mindgraph-domain.workspace = true
+mindgraph-graph = { workspace = true, features = ["hugegraph"] }
+mindgraph-ingestion.workspace = true
 mindgraph-metadata.workspace = true
 serde.workspace = true
 serde_json.workspace = true

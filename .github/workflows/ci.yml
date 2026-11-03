@@ -54,6 +54,10 @@ jobs:
         run: cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
         env:
           MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
+      - name: M4 dataset ingestion flow against HugeGraph (examples/fraud)
+        run: cargo test -p mindgraph-api --test hugegraph_ingestion --locked -- --ignored
+        env:
+          MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
 
   postgres-integration:
     name: PostgreSQL 17 integration (live)
@@ -76,7 +80,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: MetadataStore contract and PostgreSQL tests (fresh database per test)
+      - name: MetadataStore contract and PostgreSQL tests (M3 + M4 migrations, fresh database per test)
         run: cargo test -p mindgraph-metadata --test postgres_integration --locked -- --ignored
         env:
           MINDGRAPH_POSTGRES_TEST_URL: postgres://mindgraph:mindgraph@127.0.0.1:5432/mindgraph

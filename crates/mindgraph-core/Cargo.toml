@@ -8,17 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# ADR-002: no HTTP framework and no database driver here. Infrastructure is
-# reached through ports (traits) implemented by adapter crates.
+# ADR-002: no HTTP framework, HTTP client or database driver here.
+# Infrastructure is reached through ports (traits) implemented by adapter
+# crates. `mindgraph-graph` is used without its `hugegraph` feature: only the
+# GraphStore port and the in-memory store.
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 mindgraph-domain.workspace = true
+mindgraph-graph.workspace = true
+mindgraph-ingestion.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

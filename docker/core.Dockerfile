@@ -16,9 +16,13 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --no-create-home mindgraph
+    && useradd --system --uid 10001 --no-create-home mindgraph \
+    && mkdir /data && chown mindgraph:mindgraph /data
 COPY --from=builder /usr/local/bin/mindgraph-core /usr/local/bin/mindgraph-core
 USER mindgraph
-ENV MINDGRAPH_CORE_BIND_ADDR=0.0.0.0:8080
+# Uploaded source files (M4). Mount a volume here to keep them.
+ENV MINDGRAPH_CORE_BIND_ADDR=0.0.0.0:8080 \
+    MINDGRAPH_DATA_DIR=/data
+VOLUME ["/data"]
 EXPOSE 8080
 CMD ["mindgraph-core"]

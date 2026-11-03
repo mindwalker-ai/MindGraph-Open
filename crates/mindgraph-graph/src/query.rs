@@ -71,6 +71,7 @@ impl Direction {
 pub struct EntitySearch {
     entity_type: Option<TypeName>,
     property_filters: BTreeMap<PropertyKey, PropertyValue>,
+    alternatives: Option<Vec<BTreeMap<PropertyKey, PropertyValue>>>,
     limit: usize,
 }
 
@@ -79,6 +80,8 @@ impl EntitySearch {
     pub const DEFAULT_LIMIT: usize = 100;
     /// The largest accepted limit.
     pub const MAX_LIMIT: usize = 1_000;
+    /// The largest number of alternatives in [`Self::with_any_of`].
+    pub const MAX_ALTERNATIVES: usize = 1_000;
 
     /// Matches every entity of the graph, up to [`Self::DEFAULT_LIMIT`].
     #[must_use]
@@ -86,6 +89,7 @@ impl EntitySearch {
         Self {
             entity_type: None,
             property_filters: BTreeMap::new(),
+            alternatives: None,
             limit: Self::DEFAULT_LIMIT,
         }
     }
@@ -103,6 +107,34 @@ impl EntitySearch {
     pub fn with_property(mut self, key: PropertyKey, value: impl Into<PropertyValue>) -> Self {
         self.property_filters.insert(key, value.into());
         self
+    }
+
+    /// Only matches entities that equal at least one of `alternatives`
+    /// exactly. Each alternative is a set of property values that must all
+    /// match, for example one identity in a batch of identity lookups
+    /// (`customer_id = C1`, or `customer_id = C2`, ...). Combined with the
+    /// other filters by AND; replaces earlier alternatives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphStoreError::InvalidInput`] for no alternatives, more
+    /// than [`Self::MAX_ALTERNATIVES`], or an empty alternative.
+    pub fn with_any_of(
+        mut self,
+        alternatives: Vec<BTreeMap<PropertyKey, PropertyValue>>,
+    ) -> Result<Self, GraphStoreError> {
+        check_range(
+            "number of alternatives",
+            alternatives.len(),
+            Self::MAX_ALTERNATIVES,
+        )?;
+        if alternatives.iter().any(BTreeMap::is_empty) {
+            return Err(GraphStoreError::InvalidInput(
+                "every alternative needs at least one property".to_owned(),
+            ));
+        }
+        self.alternatives = Some(alternatives);
+        Ok(self)
     }
 
     /// Sets the maximum number of results.
@@ -128,21 +160,33 @@ impl EntitySearch {
         &self.property_filters
     }
 
+    /// The alternatives of [`Self::with_any_of`], if set.
+    #[must_use]
+    pub fn alternatives(&self) -> Option<&[BTreeMap<PropertyKey, PropertyValue>]> {
+        self.alternatives.as_deref()
+    }
+
     /// The maximum number of results.
     #[must_use]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
-    /// Whether `entity` satisfies the type and property filters.
+    /// Whether `entity` satisfies the type, property and alternative filters.
     pub(crate) fn matches(&self, entity: &Entity) -> bool {
+        let all = |filters: &BTreeMap<PropertyKey, PropertyValue>| {
+            filters
+                .iter()
+                .all(|(key, value)| entity.properties().get(key.as_str()) == Some(value))
+        };
         self.entity_type
             .as_ref()
             .is_none_or(|entity_type| entity.entity_type() == entity_type)
+            && all(&self.property_filters)
             && self
-                .property_filters
-                .iter()
-                .all(|(key, value)| entity.properties().get(key.as_str()) == Some(value))
+                .alternatives
+                .as_ref()
+                .is_none_or(|alternatives| alternatives.iter().any(all))
     }
 }
 

@@ -1,19 +1,26 @@
 //! The `mindgraph-core` server process: the composition root.
 //!
 //! ```text
-//! config → PostgreSQL pool → migrations → local workspace
-//!        → PostgresMetadataStore → GraphProjectService → router → serve
+//! config → PostgreSQL pool → migrations ─► PostgresMetadataStore ─┬► GraphProjectService
+//!        → HugeGraph schema (ensure_schema) ─► HugeGraphStore ──┐  ├► OntologyService
+//!        → <data dir>/sources ─► LocalSourceStore ──────────────┴──┴► IngestionService
+//!        → restart recovery (fail cut-off jobs) → router → serve
 //! ```
 //!
-//! Startup fails fast when PostgreSQL is unreachable; Docker's restart policy
-//! restarts the process. The Python AI service is not needed (ADR-007).
+//! Startup fails fast when PostgreSQL or HugeGraph is unreachable; Docker's
+//! restart policy restarts the process. The Python AI service is not needed
+//! (ADR-007): nothing here reads `MINDGRAPH_AI_URL`.
 
 use std::error::Error;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use mindgraph_api::{AppState, Config, SERVICE_NAME, router};
-use mindgraph_core::{GraphProjectService, MetadataStore};
+use mindgraph_core::{
+    GraphProjectService, IngestionPorts, IngestionService, MetadataStore, OntologyService,
+};
+use mindgraph_graph::{HugeGraphConfig, HugeGraphStore};
+use mindgraph_ingestion::LocalSourceStore;
 use mindgraph_metadata::{PostgresMetadataStore, PostgresOptions};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -49,8 +56,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
     tracing::info!("database migrations applied");
 
     let metadata: Arc<dyn MetadataStore> = Arc::new(store);
-    let graph_projects = GraphProjectService::bootstrap(metadata).await?;
-    let app = router(AppState::new(graph_projects));
+
+    let graph = connect_hugegraph(&config).await?;
+    tracing::info!("HugeGraph schema ready");
+    let sources = LocalSourceStore::new(&config.data_dir)
+        .await
+        .map_err(|err| format!("cannot prepare MINDGRAPH_DATA_DIR: {}", error_chain(&err)))?;
+
+    let graph_projects = GraphProjectService::bootstrap(Arc::clone(&metadata)).await?;
+    let workspace_id = graph_projects.workspace_id();
+    let ontology = OntologyService::new(Arc::clone(&metadata), workspace_id);
+    let ingestion = IngestionService::start(
+        IngestionPorts {
+            metadata,
+            graph: Arc::new(graph),
+            sources: Arc::new(sources),
+        },
+        workspace_id,
+        config.ingestion,
+    )?;
+    // Before serving: jobs of a previous process can never finish.
+    ingestion.recover_incomplete_jobs().await?;
+    let app = router(AppState::new(graph_projects, ontology, ingestion));
 
     let listener = TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "{SERVICE_NAME} listening");
@@ -59,6 +86,32 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .await?;
     tracing::info!("{SERVICE_NAME} stopped");
     Ok(())
+}
+
+/// Builds the HugeGraph adapter and creates its physical schema (M2's
+/// `ensure_schema`, idempotent). Fails when HugeGraph is unreachable.
+async fn connect_hugegraph(config: &Config) -> Result<HugeGraphStore, Box<dyn Error>> {
+    let hint = |err: &dyn Error| {
+        format!(
+            "cannot initialise HugeGraph (check MINDGRAPH_HUGEGRAPH_URL): {}",
+            error_chain(err)
+        )
+    };
+    // Not `hint`: this error would quote the URL.
+    let mut settings = HugeGraphConfig::new(config.hugegraph.url()).map_err(
+        |_| "MINDGRAPH_HUGEGRAPH_URL must be an http:// URL such as http://hugegraph:8080",
+    )?;
+    if let Some(graphspace) = &config.hugegraph.graphspace {
+        settings = settings
+            .with_graphspace(graphspace)
+            .map_err(|err| hint(&err))?;
+    }
+    if let Some(graph) = &config.hugegraph.graph {
+        settings = settings.with_graph_name(graph).map_err(|err| hint(&err))?;
+    }
+    let store = HugeGraphStore::new(settings).map_err(|err| hint(&err))?;
+    store.ensure_schema().await.map_err(|err| hint(&err))?;
+    Ok(store)
 }
 
 /// `error: cause: cause` on one line, for logs.

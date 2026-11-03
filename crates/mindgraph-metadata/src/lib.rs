@@ -2,7 +2,8 @@
 //!
 //! Implements [`mindgraph_core::MetadataStore`] with SQLx and explicit SQL.
 //! PostgreSQL holds control-plane metadata only (workspaces, graph projects,
-//! ontology versions); graph data lives in the `GraphStore`.
+//! ontology versions, data sources, jobs); graph data lives in the
+//! `GraphStore` and source-file bytes in the `SourceStore`.
 //!
 //! Queries are built at runtime, never checked against a live database at
 //! compile time, so building needs no database. The SQL migrations in
@@ -12,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod codec;
+mod jobs;
 mod store;
 
 pub use store::{PostgresMetadataStore, PostgresOptions};

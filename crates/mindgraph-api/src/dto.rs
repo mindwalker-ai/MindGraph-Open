@@ -4,7 +4,14 @@
 //! stays stable when internal structs evolve.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use mindgraph_domain::{EntityType, GraphProject, Ontology, PropertiesSchema, RelationshipType};
+use mindgraph_core::{
+    DataSourceView, EntityTypeInput, IngestionJob, OntologyDefinition, PropertyInput,
+    RelationshipTypeInput,
+};
+use mindgraph_domain::{
+    EntityType, GraphProject, Ontology, PropertiesSchema, PropertyType, RelationshipType,
+};
+use mindgraph_ingestion::{DatasetProfile, IngestionMapping, IngestionSummary};
 use serde::{Deserialize, Serialize};
 
 /// `POST /api/v1/graphs`
@@ -146,6 +153,206 @@ impl From<&Ontology> for OntologyResponse {
                 .iter()
                 .map(Into::into)
                 .collect(),
+        }
+    }
+}
+
+/// One property of `POST /api/v1/graphs/{graph_id}/ontology`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PropertyRequest {
+    /// Also accepted as `key`, the name used in responses.
+    #[serde(alias = "key")]
+    name: String,
+    #[serde(rename = "type")]
+    property_type: PropertyType,
+    #[serde(default)]
+    required: bool,
+}
+
+impl From<PropertyRequest> for PropertyInput {
+    fn from(request: PropertyRequest) -> Self {
+        Self {
+            name: request.name,
+            property_type: request.property_type,
+            required: request.required,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EntityTypeRequest {
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    properties: Vec<PropertyRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelationshipTypeRequest {
+    name: String,
+    source_entity_type: String,
+    target_entity_type: String,
+    #[serde(default)]
+    properties: Vec<PropertyRequest>,
+}
+
+/// `POST /api/v1/graphs/{graph_id}/ontology`: the complete next version.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateOntologyRequest {
+    entity_types: Vec<EntityTypeRequest>,
+    #[serde(default)]
+    relationship_types: Vec<RelationshipTypeRequest>,
+}
+
+impl From<CreateOntologyRequest> for OntologyDefinition {
+    fn from(request: CreateOntologyRequest) -> Self {
+        let properties =
+            |list: Vec<PropertyRequest>| list.into_iter().map(PropertyInput::from).collect();
+        Self {
+            entity_types: request
+                .entity_types
+                .into_iter()
+                .map(|entity_type| EntityTypeInput {
+                    name: entity_type.name,
+                    display_name: entity_type.display_name,
+                    description: entity_type.description,
+                    properties: properties(entity_type.properties),
+                })
+                .collect(),
+            relationship_types: request
+                .relationship_types
+                .into_iter()
+                .map(|relationship_type| RelationshipTypeInput {
+                    name: relationship_type.name,
+                    source_entity_type: relationship_type.source_entity_type,
+                    target_entity_type: relationship_type.target_entity_type,
+                    properties: properties(relationship_type.properties),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A data source, without any storage detail (no paths, no storage key).
+#[derive(Debug, Serialize)]
+pub(crate) struct DataSourceResponse {
+    id: String,
+    graph_id: String,
+    kind: &'static str,
+    filename: String,
+    status: &'static str,
+    size_bytes: u64,
+    content_sha256: String,
+    profile: Option<DatasetProfile>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<DataSourceView> for DataSourceResponse {
+    fn from(view: DataSourceView) -> Self {
+        let source = view.data_source;
+        Self {
+            id: source.id().to_string(),
+            graph_id: source.graph_id().to_string(),
+            kind: source.kind().as_str(),
+            filename: source.filename().to_owned(),
+            status: source.status().as_str(),
+            size_bytes: source.size_bytes(),
+            content_sha256: source.content_sha256().to_owned(),
+            profile: view.profile,
+            created_at: timestamp(source.created_at()),
+            updated_at: timestamp(source.updated_at()),
+        }
+    }
+}
+
+/// `POST .../data-sources/{id}/ingestions`
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IngestionRequest {
+    pub(crate) mapping: IngestionMapping,
+}
+
+#[derive(Debug, Serialize)]
+struct JobErrorResponse {
+    code: String,
+    message: String,
+}
+
+/// A job. The mapping and idempotency key are not echoed.
+#[derive(Debug, Serialize)]
+pub(crate) struct JobResponse {
+    id: String,
+    graph_id: String,
+    data_source_id: String,
+    kind: &'static str,
+    status: &'static str,
+    progress: f64,
+    ontology_version: Option<u32>,
+    error: Option<JobErrorResponse>,
+    result: Option<IngestionSummary>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<&IngestionJob> for JobResponse {
+    fn from(job: &IngestionJob) -> Self {
+        Self {
+            id: job.id.to_string(),
+            graph_id: job.graph_id.to_string(),
+            data_source_id: job.data_source_id.to_string(),
+            kind: job.kind.as_str(),
+            status: job.status.as_str(),
+            progress: job.progress,
+            ontology_version: job.ontology_version.map(|version| version.get()),
+            error: job.error.as_ref().map(|error| JobErrorResponse {
+                code: error.code.clone(),
+                message: error.message.clone(),
+            }),
+            result: job.result,
+            created_at: timestamp(job.created_at),
+            updated_at: timestamp(job.updated_at),
+        }
+    }
+}
+
+/// `202 Accepted` of `POST .../ingestions`: the job, plus the `job_id`
+/// every 202 response carries (ADR-006).
+#[derive(Debug, Serialize)]
+pub(crate) struct IngestionAcceptedResponse {
+    job_id: String,
+    #[serde(flatten)]
+    job: JobResponse,
+}
+
+impl From<&IngestionJob> for IngestionAcceptedResponse {
+    fn from(job: &IngestionJob) -> Self {
+        Self {
+            job_id: job.id.to_string(),
+            job: JobResponse::from(job),
+        }
+    }
+}
+
+/// `202 Accepted` of `POST .../analyze`.
+#[derive(Debug, Serialize)]
+pub(crate) struct JobAcceptedResponse {
+    job_id: String,
+    status: &'static str,
+}
+
+impl From<&IngestionJob> for JobAcceptedResponse {
+    fn from(job: &IngestionJob) -> Self {
+        Self {
+            job_id: job.id.to_string(),
+            status: job.status.as_str(),
         }
     }
 }

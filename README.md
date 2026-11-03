@@ -47,6 +47,52 @@ Graph projects are stored in PostgreSQL and survive restarts. Each new graph
 starts with an empty, active ontology v1. The full API is described in
 [`docs/api/openapi.yaml`](docs/api/openapi.yaml).
 
+### Load a dataset without AI (M4)
+
+The files in [`examples/fraud/`](examples/fraud/) build
+`Customer ──OWNS──> Account` deterministically. The commands use
+[`jq`](https://jqlang.org) to read ids; without it, copy the ids by hand.
+Nothing here needs Python or the AI service.
+
+```bash
+API=http://localhost:8080/api/v1
+
+# 1. Create a graph and define its ontology (Customer, Account, OWNS).
+GRAPH=$(curl -s -X POST $API/graphs -H "Content-Type: application/json" \
+  -d '{"name": "Fraud demo"}' | jq -r .id)
+curl -s -X POST $API/graphs/$GRAPH/ontology -H "Content-Type: application/json" \
+  -d @examples/fraud/ontology.json | jq '{version, types: [.entity_types[].name]}'
+
+# 2. Upload customers.csv and analyse it (an asynchronous job).
+SOURCE=$(curl -s -F file=@examples/fraud/customers.csv $API/graphs/$GRAPH/data-sources | jq -r .id)
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/analyze | jq -r .job_id)
+curl -s $API/jobs/$JOB | jq '{status, progress}'          # repeat until "completed"
+
+# 3. Inspect the inferred schema.
+curl -s $API/graphs/$GRAPH/data-sources/$SOURCE \
+  | jq '.profile.fields[] | {name, inferred_type, nullable}'
+
+# 4. Submit the mapping and watch the ingestion job (Server-Sent Events).
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" \
+  -d @examples/fraud/customers.mapping.json | jq -r .id)
+curl -N $API/jobs/$JOB/events                              # ends with "event: completed"
+
+# 5. Accounts: create Account entities, look up existing customers, link OWNS.
+SOURCE=$(curl -s -F file=@examples/fraud/accounts.csv $API/graphs/$GRAPH/data-sources | jq -r .id)
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/analyze | jq -r .job_id)
+sleep 1 && curl -s $API/jobs/$JOB | jq .status
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" \
+  -d @examples/fraud/accounts.mapping.json | jq -r .id)
+sleep 1 && curl -s $API/jobs/$JOB | jq '{status, result}'
+# → {"records_processed": 7, "entities_created": 7, "entities_matched": 5, "relationships_created": 7}
+```
+
+Submitting the same `Idempotency-Key` again returns the same job instead of
+ingesting twice. After the first successful ingestion the graph's status
+changes from `draft` to `active`.
+
 | Service     | Role                                 | Address                      |
 | ----------- | ------------------------------------ | ---------------------------- |
 | `web`       | Next.js UI                           | http://localhost:3000        |
@@ -133,7 +179,7 @@ make help      # list all targets
 | `make check-domain-boundary` | Fail if `mindgraph-domain` depends on infrastructure crates   |
 | `make fmt`                   | Format Rust, TypeScript and Python                            |
 | `make hugegraph-test-up`     | Start a throwaway HugeGraph 1.7 on `127.0.0.1:18080`          |
-| `make test-hugegraph`        | Run the `GraphStore` contract against that live HugeGraph     |
+| `make test-hugegraph`        | Run the `GraphStore` contract and the M4 ingestion flow against that live HugeGraph |
 | `make postgres-test-up`      | Start a throwaway PostgreSQL 17 on `127.0.0.1:15432`          |
 | `make test-postgres`         | Run the metadata store tests against that live PostgreSQL     |
 
@@ -151,8 +197,13 @@ make postgres-test-down
 ```
 
 Running `mindgraph-core` outside Docker (`make dev-core`) needs
-`MINDGRAPH_DATABASE_URL` pointing at a PostgreSQL 17 database. Migrations run
-automatically at startup; no `sqlx` CLI is needed.
+`MINDGRAPH_DATABASE_URL` pointing at a PostgreSQL 17 database and
+`MINDGRAPH_HUGEGRAPH_URL` pointing at HugeGraph 1.7. Migrations and the
+HugeGraph schema are applied automatically at startup; no `sqlx` CLI is
+needed. Uploaded files go to `./data` unless `MINDGRAPH_DATA_DIR` is set.
+
+A 10,000-row performance sanity check (not part of CI) runs with
+`cargo test --release -p mindgraph-api --test ingestion_perf -- --ignored --nocapture`.
 
 ### Tooling
 
@@ -164,7 +215,8 @@ automatically at startup; no `sqlx` CLI is needed.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the
 above on every pull request. It also runs the live HugeGraph contract suite
-against a `hugegraph/hugegraph:1.7.0` service container, and validates and
+and the M4 ingestion flow against a `hugegraph/hugegraph:1.7.0` service
+container, the metadata store suite against PostgreSQL 17, and validates and
 builds the Docker images.
 
 ## Domain model (M1)
@@ -209,6 +261,34 @@ database. Both backends pass the same contract test suite. Details,
 the physical mapping and current limitations are in
 [`docs/architecture/`](docs/architecture/README.md#graph-storage-adr-004-m2).
 
+## Dataset ingestion (M4)
+
+`crates/mindgraph-ingestion` is the deterministic dataset engine (ADR-008),
+orchestrated by `IngestionService` in `mindgraph-core`:
+
+- **Formats:** CSV with a header row, and JSON as a top-level array of flat
+  objects. Files are streamed, never loaded whole into memory.
+- **Analysis job:** record count and, per field, the inferred type, nullability,
+  non-null count and up to 5 sample values (plus up to 20 sample rows).
+  Inference is conservative: `00123` stays a string, JSON strings are never
+  re-read as numbers, mixed integer/float widens to float, anything else
+  mixed is a string.
+- **Mapping:** several entities per record (by alias), `create_or_match` or
+  `match_only` with exact identity fields, and relationships between
+  aliases. Validated against the active ontology before a job is created;
+  the job is pinned to that ontology version.
+- **Ingestion job:** a preflight pass checks every record before the first
+  write, then batched `GraphStore` writes with a job-scoped identity cache
+  and batched identity lookups. Progress is persisted per batch and
+  available over SSE. Jobs cut off by a restart are marked
+  `PROCESS_RESTARTED`.
+
+Uploaded files are stored by data source id under `MINDGRAPH_DATA_DIR`
+(Compose: the `mindgraph-data` volume), never under the user's filename.
+Graph writes are not transactional across batches. Details, bounds and known
+limitations are in
+[`docs/architecture/`](docs/architecture/README.md#dataset-ingestion-adr-008-m4).
+
 ## Configuration
 
 Configuration uses environment variables (ADR-013). See
@@ -219,7 +299,13 @@ Configuration uses environment variables (ADR-013). See
 | `MINDGRAPH_CORE_BIND_ADDR`    | core      | `0.0.0.0:8080` in the container   |
 | `MINDGRAPH_DATABASE_URL`      | core      | built from `MINDGRAPH_POSTGRES_*` (required) |
 | `MINDGRAPH_DATABASE_MAX_CONNECTIONS` | core | `10` |
-| `MINDGRAPH_HUGEGRAPH_URL`     | core (M2) | `http://hugegraph:8080`           |
+| `MINDGRAPH_HUGEGRAPH_URL`     | core      | `http://hugegraph:8080` (required, no credentials) |
+| `MINDGRAPH_HUGEGRAPH_GRAPHSPACE` / `_GRAPH` | core | `DEFAULT` / `hugegraph`       |
+| `MINDGRAPH_DATA_DIR`          | core (M4) | `/data` (volume `mindgraph-data`); `./data` outside Docker |
+| `MINDGRAPH_MAX_UPLOAD_BYTES`  | core (M4) | `52428800` (50 MiB)               |
+| `MINDGRAPH_MAX_INGESTION_RECORDS` | core (M4) | `100000`                      |
+| `MINDGRAPH_INGESTION_BATCH_SIZE` | core (M4) | `500` (1–5000)                 |
+| `MINDGRAPH_JOB_CONCURRENCY`   | core (M4) | `2` (1–16)                        |
 | `MINDGRAPH_AI_URL`            | core (M5) | `http://ai:8000`                  |
 | `MINDGRAPH_LLM_PROVIDER`      | ai (M5)   | empty (AI disabled)               |
 | `MINDGRAPH_LLM_API_KEY`       | ai (M5)   | empty                             |
@@ -237,8 +323,8 @@ the Docker image and in CI.
 | M1        | Domain foundation: types, UUIDv7 IDs, validation, errors | ✅ Done |
 | M2        | GraphStore trait, `MemoryGraphStore`, `HugeGraphStore`   | ✅ Done |
 | M3        | PostgreSQL migrations, project and metadata APIs         | ✅ Done |
-| M4        | CSV / JSON ingestion without AI                          | Next    |
-| M5        | AI Graph Builder (ontology suggestion, review, generate) | Planned |
+| M4        | CSV / JSON ingestion without AI                          | ✅ Done |
+| M5        | AI Graph Builder (ontology suggestion, review, generate) | Next    |
 | M6        | Visual Graph Explorer (Sigma.js, Graphology)             | Planned |
 | M7        | GraphRAG with evidence graphs                            | Planned |
 | M8        | MCP server for Claude, Codex and Cursor                  | Planned |

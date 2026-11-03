@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use chrono::{SubsecRound, Utc};
 use mindgraph_domain::{
-    DomainError, GraphId, GraphProject, GraphStatus, Ontology, OntologyVersion, WorkspaceId,
+    GraphId, GraphProject, GraphStatus, Ontology, OntologyVersion, WorkspaceId,
 };
 use tracing::info;
 
-use crate::{MetadataStore, MetadataStoreError};
+use crate::{ApplicationError, MetadataStore, MetadataStoreError};
 
 /// The number of graphs listed when no limit is given.
 pub const DEFAULT_LIST_LIMIT: usize = 50;
@@ -22,46 +22,6 @@ pub struct CreateGraphProject {
     pub name: String,
     /// An optional description. Blank text is stored as no description.
     pub description: Option<String>,
-}
-
-/// An application-level error, independent of any transport.
-#[derive(Debug, thiserror::Error)]
-pub enum ApplicationError {
-    /// The input breaks a domain rule, for example an empty graph name.
-    #[error(transparent)]
-    Validation(#[from] DomainError),
-
-    /// The request is malformed, for example a limit out of range.
-    #[error("invalid request: {0}")]
-    InvalidRequest(String),
-
-    /// The graph does not exist in the local workspace.
-    #[error("graph {0} was not found")]
-    GraphNotFound(GraphId),
-
-    /// The write conflicts with existing data.
-    #[error("conflict: {0}")]
-    Conflict(String),
-
-    /// A required backend (the metadata database) is unavailable.
-    #[error("a required backend is unavailable")]
-    Unavailable(#[source] MetadataStoreError),
-
-    /// An unexpected failure. The details are for logs, not for clients.
-    #[error("internal error: {0}")]
-    Internal(#[source] MetadataStoreError),
-}
-
-impl From<MetadataStoreError> for ApplicationError {
-    fn from(error: MetadataStoreError) -> Self {
-        match error {
-            MetadataStoreError::Conflict(message) => Self::Conflict(message),
-            MetadataStoreError::BackendUnavailable { .. } => Self::Unavailable(error),
-            // The service validates its inputs, so anything else is a bug or
-            // corrupt data rather than a client mistake.
-            other => Self::Internal(other),
-        }
-    }
 }
 
 /// Creates and reads graph projects in the local workspace.
@@ -180,7 +140,7 @@ impl GraphProjectService {
             .get_active_ontology(graph_id)
             .await?
             .ok_or_else(|| {
-                ApplicationError::Internal(MetadataStoreError::CorruptData(format!(
+                ApplicationError::internal(MetadataStoreError::CorruptData(format!(
                     "graph {graph_id} has no active ontology"
                 )))
             })
@@ -344,22 +304,5 @@ mod tests {
             ));
         }
         assert!(service.list_graphs(Some(MAX_LIST_LIMIT)).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn store_errors_map_to_application_categories() {
-        let unavailable = ApplicationError::from(MetadataStoreError::BackendUnavailable {
-            message: "down".into(),
-            source: None,
-        });
-        assert!(matches!(unavailable, ApplicationError::Unavailable(_)));
-        assert!(matches!(
-            ApplicationError::from(MetadataStoreError::Conflict("dup".into())),
-            ApplicationError::Conflict(_)
-        ));
-        assert!(matches!(
-            ApplicationError::from(MetadataStoreError::CorruptData("bad".into())),
-            ApplicationError::Internal(_)
-        ));
     }
 }

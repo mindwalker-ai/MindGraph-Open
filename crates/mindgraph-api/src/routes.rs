@@ -2,44 +2,85 @@
 
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
-use mindgraph_core::{CreateGraphProject, GraphProjectService};
+use mindgraph_core::{CreateGraphProject, GraphProjectService, IngestionService, OntologyService};
 use mindgraph_domain::GraphId;
 use serde::Serialize;
 
 use crate::SERVICE_NAME;
+use crate::datasets;
 use crate::dto::{
     CreateGraphRequest, GraphListResponse, GraphResponse, ListGraphsQuery, OntologyResponse,
 };
 use crate::error::ApiError;
 use crate::request_context::request_context;
 
+/// Room for multipart framing on top of the file itself.
+const MULTIPART_OVERHEAD_BYTES: u64 = 64 * 1024;
+
 /// Shared state of the HTTP layer: the application services it calls.
+/// Handlers never see database pools, graph clients or filesystem paths.
 #[derive(Debug, Clone)]
 pub struct AppState {
-    graph_projects: Arc<GraphProjectService>,
+    pub(crate) graph_projects: Arc<GraphProjectService>,
+    pub(crate) ontology: Arc<OntologyService>,
+    pub(crate) ingestion: Arc<IngestionService>,
 }
 
 impl AppState {
     /// Wraps the application services.
     #[must_use]
-    pub fn new(graph_projects: GraphProjectService) -> Self {
+    pub fn new(
+        graph_projects: GraphProjectService,
+        ontology: OntologyService,
+        ingestion: IngestionService,
+    ) -> Self {
         Self {
             graph_projects: Arc::new(graph_projects),
+            ontology: Arc::new(ontology),
+            ingestion: Arc::new(ingestion),
         }
     }
 }
 
 /// Builds the application router.
 pub fn router(state: AppState) -> Router {
+    let upload_limit = state
+        .ingestion
+        .config()
+        .max_upload_bytes
+        .saturating_add(MULTIPART_OVERHEAD_BYTES);
+    let upload_limit = usize::try_from(upload_limit).unwrap_or(usize::MAX);
     let api = Router::new()
         .route("/graphs", get(list_graphs).post(create_graph))
         .route("/graphs/{graph_id}", get(get_graph))
-        .route("/graphs/{graph_id}/ontology", get(get_ontology));
+        .route(
+            "/graphs/{graph_id}/ontology",
+            get(get_ontology).post(datasets::create_ontology),
+        )
+        .route(
+            "/graphs/{graph_id}/data-sources",
+            post(datasets::upload_data_source).layer(DefaultBodyLimit::max(upload_limit)),
+        )
+        .route(
+            "/graphs/{graph_id}/data-sources/{data_source_id}",
+            get(datasets::get_data_source),
+        )
+        .route(
+            "/graphs/{graph_id}/data-sources/{data_source_id}/analyze",
+            post(datasets::analyze_data_source),
+        )
+        .route(
+            "/graphs/{graph_id}/data-sources/{data_source_id}/ingestions",
+            post(datasets::start_ingestion),
+        )
+        .route("/jobs/{job_id}", get(datasets::get_job))
+        .route("/jobs/{job_id}/events", get(datasets::job_events));
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -89,7 +130,7 @@ async fn route_not_found() -> ApiError {
     )
 }
 
-fn graph_id(path: Result<Path<String>, PathRejection>) -> Result<GraphId, ApiError> {
+pub(crate) fn graph_id(path: Result<Path<String>, PathRejection>) -> Result<GraphId, ApiError> {
     let Path(raw) = path?;
     raw.parse().map_err(|_| ApiError::invalid_graph_id())
 }

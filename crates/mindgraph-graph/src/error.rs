@@ -67,6 +67,7 @@ pub enum GraphStoreError {
 
 impl GraphStoreError {
     /// A [`GraphStoreError::BackendError`] without an underlying error.
+    #[cfg(feature = "hugegraph")]
     pub(crate) fn backend(message: impl Into<String>) -> Self {
         Self::BackendError {
             message: message.into(),

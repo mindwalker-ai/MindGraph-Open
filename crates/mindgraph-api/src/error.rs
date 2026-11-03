@@ -49,6 +49,14 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn invalid_id(code: &'static str, what: &str) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            code,
+            format!("The {what} must be a MindGraph id (UUIDv7)"),
+        )
+    }
+
     pub(crate) fn not_ready() -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -80,13 +88,31 @@ impl From<ApplicationError> for ApiError {
                 "GRAPH_NOT_FOUND",
                 "Graph was not found",
             ),
+            ApplicationError::DataSourceNotFound(_) => Self::new(
+                StatusCode::NOT_FOUND,
+                "DATA_SOURCE_NOT_FOUND",
+                "Data source was not found",
+            ),
+            ApplicationError::JobNotFound(_) => {
+                Self::new(StatusCode::NOT_FOUND, "JOB_NOT_FOUND", "Job was not found")
+            }
             ApplicationError::Conflict(message) => {
+                // Service conflict messages describe state, never stored data.
                 warn!(error = %message, "request conflicted with existing data");
-                Self::new(
-                    StatusCode::CONFLICT,
-                    "CONFLICT",
-                    "The request conflicts with existing data",
-                )
+                Self::new(StatusCode::CONFLICT, "CONFLICT", message)
+            }
+            ApplicationError::UnsupportedFormat(message) => Self::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "UNSUPPORTED_FILE_TYPE",
+                message,
+            ),
+            ApplicationError::PayloadTooLarge { max_bytes } => Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+                format!("The upload exceeds the maximum size of {max_bytes} bytes"),
+            ),
+            ApplicationError::Unprocessable { code, message } => {
+                Self::new(StatusCode::UNPROCESSABLE_ENTITY, code, message)
             }
             ApplicationError::Unavailable(source) => {
                 warn!(error = %source, "a required backend is unavailable");

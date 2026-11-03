@@ -6,6 +6,8 @@
 
 #![allow(clippy::unwrap_used)] // Panicking is the intended failure mode in tests.
 
+use std::collections::BTreeMap;
+
 use chrono::{TimeZone, Utc};
 use mindgraph_domain::{
     Entity, EntityId, GraphId, Properties, PropertyKey, PropertyValue, Relationship,
@@ -39,6 +41,8 @@ macro_rules! graph_store_contract {
             search_filters_by_entity_type,
             search_filters_by_exact_property,
             search_respects_limit_and_orders_by_id,
+            search_pages_through_large_types_exactly_once,
+            search_matches_any_of_several_identities,
             search_is_isolated_per_graph,
             neighbors_follow_direction,
             neighbors_filter_by_relationship_type,
@@ -514,6 +518,128 @@ pub async fn search_respects_limit_and_orders_by_id(store: &dyn GraphStore) {
         .await
         .unwrap();
     assert_eq!(first_three, again, "deterministic");
+    cleanup(store, &[graph_id]).await;
+}
+
+/// More entities than one backend page (HugeGraph pages hold 500): every
+/// entity is found exactly once, including those at page boundaries.
+pub async fn search_pages_through_large_types_exactly_once(store: &dyn GraphStore) {
+    let graph_id = GraphId::new();
+    let created: Vec<Entity> = (0..1_234)
+        .map(|i| {
+            entity(
+                graph_id,
+                "Customer",
+                &[("customer_id", PropertyValue::from(format!("C{i:05}")))],
+            )
+        })
+        .collect();
+    for chunk in created.chunks(250) {
+        store.create_entities(chunk.to_vec()).await.unwrap();
+    }
+    let mut sorted_ids = ids(&created);
+    sorted_ids.sort();
+
+    let by_type = EntitySearch::new()
+        .with_entity_type(name("Customer"))
+        .with_limit(EntitySearch::MAX_LIMIT)
+        .unwrap();
+    let found = store.search_entities(graph_id, &by_type).await.unwrap();
+    assert_eq!(
+        ids(&found),
+        sorted_ids[..EntitySearch::MAX_LIMIT],
+        "no duplicates, no gaps"
+    );
+
+    for index in [0, 499, 500, 501, 999, 1_000, 1_233] {
+        let search = EntitySearch::new()
+            .with_entity_type(name("Customer"))
+            .with_property(
+                key("customer_id"),
+                PropertyValue::from(format!("C{index:05}")),
+            )
+            .with_limit(2)
+            .unwrap();
+        let matches = store.search_entities(graph_id, &search).await.unwrap();
+        assert_eq!(ids(&matches), [created[index].id()], "customer {index}");
+    }
+    cleanup(store, &[graph_id]).await;
+}
+
+/// One search for a batch of identities, as dataset ingestion does.
+pub async fn search_matches_any_of_several_identities(store: &dyn GraphStore) {
+    let graph_id = GraphId::new();
+    let customer = |id: &str, region: &str| {
+        entity(
+            graph_id,
+            "Customer",
+            &[
+                ("customer_id", PropertyValue::from(id)),
+                ("region", PropertyValue::from(region)),
+            ],
+        )
+    };
+    let (c1, c2, c3) = (
+        customer("C1", "EU"),
+        customer("C2", "US"),
+        customer("C3", "EU"),
+    );
+    let other_type = entity(
+        graph_id,
+        "Account",
+        &[("customer_id", PropertyValue::from("C1"))],
+    );
+    seed(store, &[&c1, &c2, &c3, &other_type], &[]).await;
+    let identity = |pairs: &[(&str, &str)]| -> BTreeMap<PropertyKey, PropertyValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (key(k), PropertyValue::from(*v)))
+            .collect()
+    };
+    let search = |alternatives| {
+        EntitySearch::new()
+            .with_entity_type(name("Customer"))
+            .with_any_of(alternatives)
+            .unwrap()
+    };
+
+    let found = store
+        .search_entities(
+            graph_id,
+            &search(vec![
+                identity(&[("customer_id", "C1")]),
+                identity(&[("customer_id", "C3")]),
+                identity(&[("customer_id", "C9")]),
+            ]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&found), sorted(vec![c1.id(), c3.id()]));
+
+    // Composite alternatives must match completely.
+    let composite = search(vec![
+        identity(&[("customer_id", "C2"), ("region", "EU")]),
+        identity(&[("customer_id", "C3"), ("region", "EU")]),
+    ]);
+    let found = store.search_entities(graph_id, &composite).await.unwrap();
+    assert_eq!(ids(&found), [c3.id()]);
+
+    // Alternatives AND plain property filters.
+    let narrowed = search(vec![
+        identity(&[("customer_id", "C1")]),
+        identity(&[("customer_id", "C2")]),
+    ])
+    .with_property(key("region"), "US");
+    let found = store.search_entities(graph_id, &narrowed).await.unwrap();
+    assert_eq!(ids(&found), [c2.id()]);
+
+    for invalid in [
+        EntitySearch::new().with_any_of(vec![]),
+        EntitySearch::new().with_any_of(vec![BTreeMap::new()]),
+        EntitySearch::new().with_any_of(vec![identity(&[("a", "b")]); 1_001]),
+    ] {
+        assert!(matches!(invalid, Err(GraphStoreError::InvalidInput(_))));
+    }
     cleanup(store, &[graph_id]).await;
 }
 

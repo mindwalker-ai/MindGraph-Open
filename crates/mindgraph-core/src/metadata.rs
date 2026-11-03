@@ -1,14 +1,17 @@
 //! The metadata port: persistence of control-plane data (ADR-005).
 //!
-//! Workspaces, graph projects and ontology versions live here. Graph
-//! topology does not: entities and relationships belong to the `GraphStore`.
-
-use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+//! Workspaces, graph projects, ontology versions, data sources and jobs live
+//! here. Graph topology does not: entities and relationships belong to the
+//! `GraphStore`, and source-file bytes belong to the `SourceStore`.
 
 use async_trait::async_trait;
-use chrono::{SubsecRound, Utc};
-use mindgraph_domain::{GraphId, GraphProject, Ontology, OntologyVersion, Workspace, WorkspaceId};
+use mindgraph_domain::{
+    DataSource, DataSourceId, GraphId, GraphProject, IngestionJobId, Ontology, OntologyVersion,
+    Workspace, WorkspaceId,
+};
+use mindgraph_ingestion::{DatasetProfile, IngestionSummary};
+
+use crate::{IngestionJob, JobError};
 
 /// The name given to the local workspace when it is first created.
 pub const LOCAL_WORKSPACE_NAME: &str = "Local";
@@ -24,7 +27,8 @@ pub enum MetadataStoreError {
     #[error("not found: {0}")]
     NotFound(String),
 
-    /// The write would duplicate an existing record.
+    /// The write would duplicate an existing record, or a state transition
+    /// is not allowed from the record's current state.
     #[error("conflict: {0}")]
     Conflict(String),
 
@@ -61,7 +65,19 @@ pub enum MetadataStoreError {
     Serialization(String),
 }
 
-/// Persistence of workspaces, graph projects and ontology versions.
+/// A data source together with its private storage metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataSourceRecord {
+    /// The public data source.
+    pub data_source: DataSource,
+    /// The backend-relative key of the source file. Never shown to clients.
+    pub storage_key: String,
+    /// The profile, once an analysis job has succeeded.
+    pub profile: Option<DatasetProfile>,
+}
+
+/// Persistence of workspaces, graph projects, ontology versions, data
+/// sources and jobs.
 ///
 /// Object safe and `Send + Sync`, so it can be shared as
 /// `Arc<dyn MetadataStore>`.
@@ -71,8 +87,15 @@ pub enum MetadataStoreError {
 /// - Records are never overwritten by create operations. A duplicate is a
 ///   [`Conflict`](MetadataStoreError::Conflict).
 /// - Ontology versions are immutable. New versions are added with
-///   [`create_ontology`](Self::create_ontology).
+///   [`create_ontology`](Self::create_ontology) or
+///   [`create_and_activate_ontology`](Self::create_and_activate_ontology).
 /// - A graph project always has an active ontology version that exists.
+/// - Data sources and jobs are scoped to their graph: a data source of graph
+///   A is not found through graph B.
+/// - Jobs move only `queued → running → completed | failed`, or
+///   `queued → failed`. Other transitions are a
+///   [`Conflict`](MetadataStoreError::Conflict). Progress never decreases
+///   and stays within `0.0..=1.0`.
 /// - Timestamps are stored with microsecond precision. Callers that need
 ///   identical values after a round trip should truncate to microseconds.
 #[async_trait]
@@ -111,6 +134,14 @@ pub trait MetadataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<GraphProject>, MetadataStoreError>;
 
+    /// Moves a `draft` graph to `active` and returns it. An `active` graph is
+    /// returned unchanged; an `archived` graph is not reactivated.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) if the graph does not exist.
+    async fn activate_graph(&self, id: GraphId) -> Result<GraphProject, MetadataStoreError>;
+
     /// Stores a new ontology version for an existing graph. Does not change
     /// which version is active.
     ///
@@ -119,6 +150,17 @@ pub trait MetadataStore: Send + Sync {
     /// [`NotFound`](MetadataStoreError::NotFound) if the graph does not exist,
     /// [`Conflict`](MetadataStoreError::Conflict) if the version exists.
     async fn create_ontology(&self, ontology: &Ontology) -> Result<(), MetadataStoreError>;
+
+    /// Atomically stores a new ontology version and makes it the active one.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`create_ontology`](Self::create_ontology). Nothing is
+    /// stored on error.
+    async fn create_and_activate_ontology(
+        &self,
+        ontology: &Ontology,
+    ) -> Result<(), MetadataStoreError>;
 
     /// Reads one ontology version.
     async fn get_ontology(
@@ -146,201 +188,126 @@ pub trait MetadataStore: Send + Sync {
         version: OntologyVersion,
     ) -> Result<(), MetadataStoreError>;
 
+    /// Stores a new (pending) data source.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) if the graph does not
+    /// exist, [`Conflict`](MetadataStoreError::Conflict) if the id exists.
+    async fn create_data_source(
+        &self,
+        data_source: &DataSource,
+        storage_key: &str,
+    ) -> Result<(), MetadataStoreError>;
+
+    /// Reads a data source of a graph. A data source of another graph is
+    /// `None`.
+    async fn get_data_source(
+        &self,
+        graph_id: GraphId,
+        id: DataSourceId,
+    ) -> Result<Option<DataSourceRecord>, MetadataStoreError>;
+
+    /// Stores the profile of a data source and marks it `ready`.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) if it does not exist in the
+    /// graph.
+    async fn mark_data_source_ready(
+        &self,
+        graph_id: GraphId,
+        id: DataSourceId,
+        profile: &DatasetProfile,
+    ) -> Result<DataSource, MetadataStoreError>;
+
+    /// Marks a data source `failed` and removes any stored profile.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) if it does not exist in the
+    /// graph.
+    async fn mark_data_source_failed(
+        &self,
+        graph_id: GraphId,
+        id: DataSourceId,
+    ) -> Result<DataSource, MetadataStoreError>;
+
+    /// Stores a new job.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) if its data source does not
+    /// exist in its graph, [`Conflict`](MetadataStoreError::Conflict) if the
+    /// id or the graph's idempotency key is already used, and
+    /// [`InvalidInput`](MetadataStoreError::InvalidInput) for a pinned
+    /// ontology version that does not exist or a job that is not `queued`.
+    async fn create_job(&self, job: &IngestionJob) -> Result<(), MetadataStoreError>;
+
+    /// Reads a job.
+    async fn get_job(&self, id: IngestionJobId)
+    -> Result<Option<IngestionJob>, MetadataStoreError>;
+
+    /// Finds the job a graph created with an idempotency key.
+    async fn find_job_by_idempotency_key(
+        &self,
+        graph_id: GraphId,
+        key: &str,
+    ) -> Result<Option<IngestionJob>, MetadataStoreError>;
+
+    /// `queued → running`. Returns the updated job.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) or
+    /// [`Conflict`](MetadataStoreError::Conflict) if the job is not queued.
+    async fn start_job(&self, id: IngestionJobId) -> Result<IngestionJob, MetadataStoreError>;
+
+    /// Raises the progress of a running job. Values are clamped to
+    /// `0.0..=1.0`; a value below the stored progress is ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidInput`](MetadataStoreError::InvalidInput) for NaN,
+    /// [`NotFound`](MetadataStoreError::NotFound), or
+    /// [`Conflict`](MetadataStoreError::Conflict) if the job is not running.
+    async fn update_job_progress(
+        &self,
+        id: IngestionJobId,
+        progress: f64,
+    ) -> Result<(), MetadataStoreError>;
+
+    /// `running → completed`, with progress `1.0` and an optional result.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) or
+    /// [`Conflict`](MetadataStoreError::Conflict) if the job is not running.
+    async fn complete_job(
+        &self,
+        id: IngestionJobId,
+        result: Option<&IngestionSummary>,
+    ) -> Result<IngestionJob, MetadataStoreError>;
+
+    /// `queued | running → failed`, recording the error. Progress is kept.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](MetadataStoreError::NotFound) or
+    /// [`Conflict`](MetadataStoreError::Conflict) if the job already finished.
+    async fn fail_job(
+        &self,
+        id: IngestionJobId,
+        error: &JobError,
+    ) -> Result<IngestionJob, MetadataStoreError>;
+
+    /// Fails every `queued` or `running` job (restart recovery) and returns
+    /// how many were changed.
+    async fn mark_incomplete_jobs_failed(
+        &self,
+        error: &JobError,
+    ) -> Result<u64, MetadataStoreError>;
+
     /// Checks that the backend is reachable (used for readiness).
     async fn ping(&self) -> Result<(), MetadataStoreError>;
-}
-
-/// An in-memory [`MetadataStore`]: the reference behaviour of the contract,
-/// for tests and local development. Data is lost when the process exits.
-#[derive(Debug, Default)]
-pub struct MemoryMetadataStore {
-    state: Mutex<State>,
-}
-
-#[derive(Debug, Default)]
-struct State {
-    local_workspace: Option<WorkspaceId>,
-    workspaces: BTreeMap<WorkspaceId, Workspace>,
-    /// Each graph with its active ontology version.
-    graphs: BTreeMap<GraphId, (GraphProject, OntologyVersion)>,
-    ontologies: BTreeMap<(GraphId, OntologyVersion), Ontology>,
-}
-
-impl MemoryMetadataStore {
-    /// Creates an empty store.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    // Every method validates before mutating, so state behind a poisoned
-    // lock is still consistent.
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-fn domain_failure(error: &mindgraph_domain::DomainError) -> MetadataStoreError {
-    MetadataStoreError::BackendError {
-        message: error.to_string(),
-        source: None,
-    }
-}
-
-#[async_trait]
-impl MetadataStore for MemoryMetadataStore {
-    async fn ensure_local_workspace(&self) -> Result<Workspace, MetadataStoreError> {
-        let mut state = self.state();
-        if let Some(workspace) = state
-            .local_workspace
-            .and_then(|id| state.workspaces.get(&id))
-        {
-            return Ok(workspace.clone());
-        }
-        let now = Utc::now().trunc_subsecs(6);
-        let workspace = Workspace::from_parts(WorkspaceId::new(), LOCAL_WORKSPACE_NAME, now, now)
-            .map_err(|err| domain_failure(&err))?;
-        state.local_workspace = Some(workspace.id());
-        state.workspaces.insert(workspace.id(), workspace.clone());
-        Ok(workspace)
-    }
-
-    async fn get_workspace(
-        &self,
-        id: WorkspaceId,
-    ) -> Result<Option<Workspace>, MetadataStoreError> {
-        Ok(self.state().workspaces.get(&id).cloned())
-    }
-
-    async fn create_graph(
-        &self,
-        graph: &GraphProject,
-        initial_ontology: &Ontology,
-    ) -> Result<(), MetadataStoreError> {
-        if initial_ontology.graph_id() != graph.id() {
-            return Err(MetadataStoreError::InvalidInput(format!(
-                "initial ontology belongs to graph {}, not {}",
-                initial_ontology.graph_id(),
-                graph.id()
-            )));
-        }
-        let mut state = self.state();
-        if !state.workspaces.contains_key(&graph.workspace_id()) {
-            return Err(MetadataStoreError::NotFound(format!(
-                "workspace {}",
-                graph.workspace_id()
-            )));
-        }
-        if state.graphs.contains_key(&graph.id()) {
-            return Err(MetadataStoreError::Conflict(format!(
-                "graph {} already exists",
-                graph.id()
-            )));
-        }
-        let version = initial_ontology.version();
-        state.graphs.insert(graph.id(), (graph.clone(), version));
-        state
-            .ontologies
-            .insert((graph.id(), version), initial_ontology.clone());
-        Ok(())
-    }
-
-    async fn get_graph(&self, id: GraphId) -> Result<Option<GraphProject>, MetadataStoreError> {
-        Ok(self.state().graphs.get(&id).map(|(graph, _)| graph.clone()))
-    }
-
-    async fn list_graphs(
-        &self,
-        workspace_id: WorkspaceId,
-        limit: usize,
-    ) -> Result<Vec<GraphProject>, MetadataStoreError> {
-        let state = self.state();
-        let mut graphs: Vec<GraphProject> = state
-            .graphs
-            .values()
-            .map(|(graph, _)| graph)
-            .filter(|graph| graph.workspace_id() == workspace_id)
-            .cloned()
-            .collect();
-        graphs.sort_by(|a, b| {
-            b.created_at()
-                .cmp(&a.created_at())
-                .then_with(|| b.id().cmp(&a.id()))
-        });
-        graphs.truncate(limit);
-        Ok(graphs)
-    }
-
-    async fn create_ontology(&self, ontology: &Ontology) -> Result<(), MetadataStoreError> {
-        let mut state = self.state();
-        let key = (ontology.graph_id(), ontology.version());
-        if !state.graphs.contains_key(&key.0) {
-            return Err(MetadataStoreError::NotFound(format!("graph {}", key.0)));
-        }
-        if state.ontologies.contains_key(&key) {
-            return Err(MetadataStoreError::Conflict(format!(
-                "ontology {} of graph {} already exists",
-                key.1, key.0
-            )));
-        }
-        state.ontologies.insert(key, ontology.clone());
-        Ok(())
-    }
-
-    async fn get_ontology(
-        &self,
-        graph_id: GraphId,
-        version: OntologyVersion,
-    ) -> Result<Option<Ontology>, MetadataStoreError> {
-        Ok(self.state().ontologies.get(&(graph_id, version)).cloned())
-    }
-
-    async fn get_active_ontology(
-        &self,
-        graph_id: GraphId,
-    ) -> Result<Option<Ontology>, MetadataStoreError> {
-        let state = self.state();
-        let Some((_, version)) = state.graphs.get(&graph_id) else {
-            return Ok(None);
-        };
-        match state.ontologies.get(&(graph_id, *version)) {
-            Some(ontology) => Ok(Some(ontology.clone())),
-            None => Err(MetadataStoreError::CorruptData(format!(
-                "graph {graph_id} points to missing ontology {version}"
-            ))),
-        }
-    }
-
-    async fn set_active_ontology(
-        &self,
-        graph_id: GraphId,
-        version: OntologyVersion,
-    ) -> Result<(), MetadataStoreError> {
-        let mut state = self.state();
-        if !state.ontologies.contains_key(&(graph_id, version)) {
-            return Err(MetadataStoreError::NotFound(format!(
-                "ontology {version} of graph {graph_id}"
-            )));
-        }
-        let Some((graph, active)) = state.graphs.get_mut(&graph_id) else {
-            return Err(MetadataStoreError::NotFound(format!("graph {graph_id}")));
-        };
-        let now = Utc::now().trunc_subsecs(6).max(graph.updated_at());
-        *graph = GraphProject::from_parts(
-            graph.id(),
-            graph.workspace_id(),
-            graph.name(),
-            graph.description(),
-            graph.status(),
-            graph.created_at(),
-            now,
-        )
-        .map_err(|err| domain_failure(&err))?;
-        *active = version;
-        Ok(())
-    }
-
-    async fn ping(&self) -> Result<(), MetadataStoreError> {
-        Ok(())
-    }
 }

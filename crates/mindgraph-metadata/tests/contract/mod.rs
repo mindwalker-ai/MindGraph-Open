@@ -6,12 +6,18 @@
 #![allow(clippy::unwrap_used)] // Panicking is the intended failure mode in tests.
 
 use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
-use mindgraph_core::{MetadataStore, MetadataStoreError};
+use mindgraph_core::{IngestionJob, JobError, JobStatus, MetadataStore, MetadataStoreError};
 use mindgraph_domain::{
-    EntityType, EntityTypeId, GraphId, GraphProject, GraphStatus, Ontology, OntologyVersion,
-    PropertiesSchema, PropertyDefinition, PropertyKey, PropertyType, RelationshipType,
-    RelationshipTypeId, TypeName, WorkspaceId,
+    DataSource, DataSourceId, DataSourceKind, DataSourceStatus, EntityType, EntityTypeId, GraphId,
+    GraphProject, GraphStatus, IngestionJobId, Ontology, OntologyVersion, PropertiesSchema,
+    PropertyDefinition, PropertyKey, PropertyType, RelationshipType, RelationshipTypeId, TypeName,
+    WorkspaceId,
 };
+use mindgraph_ingestion::{
+    DatasetProfile, EntityMapping, EntityMode, FieldMapping, FieldProfile, IngestionMapping,
+    IngestionSummary,
+};
+use serde_json::json;
 
 /// One test per case for `$factory`, an `async fn() -> Arc<dyn MetadataStore>`.
 /// The bracket holds extra attributes, e.g. `[ignore = "needs PostgreSQL"]`.
@@ -33,6 +39,18 @@ macro_rules! metadata_store_contract {
             rich_ontology_round_trips,
             ontologies_are_isolated_per_graph,
             ping_succeeds,
+            create_and_activate_ontology_is_atomic,
+            activate_graph_moves_draft_to_active_only,
+            data_sources_round_trip,
+            data_sources_are_scoped_to_their_graph,
+            data_source_writes_are_validated,
+            data_source_profiles_follow_status,
+            jobs_round_trip_with_pinned_ontology,
+            job_creation_is_validated,
+            job_transitions_are_controlled,
+            job_progress_is_monotonic_and_bounded,
+            idempotency_keys_are_unique_per_graph,
+            incomplete_jobs_are_failed_on_recovery,
         );
     };
     (@cases $attrs:tt $factory:path; $($case:ident),* $(,)?) => {
@@ -404,4 +422,478 @@ pub async fn ontologies_are_isolated_per_graph(store: &dyn MetadataStore) {
 
 pub async fn ping_succeeds(store: &dyn MetadataStore) {
     store.ping().await.unwrap();
+}
+
+// --- M4: ontology activation, data sources and jobs --------------------------
+
+const SHA: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+/// A local-workspace graph with ontology v1, and a pending data source.
+async fn graph_with_source(store: &dyn MetadataStore) -> (GraphProject, DataSource) {
+    let workspace = store.ensure_local_workspace().await.unwrap();
+    let graph = graph_at(workspace.id(), "Fraud", now());
+    create(store, &graph).await;
+    let source = data_source(graph.id(), "customers.csv");
+    store
+        .create_data_source(&source, &format!("sources/{}/source", source.id()))
+        .await
+        .unwrap();
+    (graph, source)
+}
+
+fn data_source(graph_id: GraphId, filename: &str) -> DataSource {
+    DataSource::new(
+        DataSourceId::new(),
+        graph_id,
+        DataSourceKind::Csv,
+        filename,
+        81_232,
+        SHA,
+        now(),
+    )
+    .unwrap()
+}
+
+fn profile() -> DatasetProfile {
+    DatasetProfile {
+        record_count: 2,
+        fields: vec![FieldProfile {
+            name: "customer_id".into(),
+            inferred_type: PropertyType::String,
+            nullable: false,
+            non_null_count: 2,
+            sample_values: vec!["C001".into(), "C002".into()],
+        }],
+        sample_rows: vec![
+            json!({"customer_id": "C001"}).as_object().unwrap().clone(),
+            json!({"customer_id": "C002"}).as_object().unwrap().clone(),
+        ],
+    }
+}
+
+fn mapping() -> IngestionMapping {
+    let field = || FieldMapping {
+        source_field: "customer_id".into(),
+        property: "customer_id".into(),
+    };
+    IngestionMapping {
+        entities: vec![EntityMapping {
+            alias: "customer".into(),
+            entity_type: "Customer".into(),
+            mode: EntityMode::CreateOrMatch,
+            identity: vec![field()],
+            properties: vec![field()],
+        }],
+        relationships: vec![],
+    }
+}
+
+fn ingestion(graph_id: GraphId, source: DataSourceId, key: &str) -> IngestionJob {
+    IngestionJob::ingestion(
+        graph_id,
+        source,
+        OntologyVersion::INITIAL,
+        key.to_owned(),
+        mapping(),
+        now(),
+    )
+}
+
+pub async fn create_and_activate_ontology_is_atomic(store: &dyn MetadataStore) {
+    let workspace = store.ensure_local_workspace().await.unwrap();
+    let graph = graph_at(workspace.id(), "Fraud", now());
+    create(store, &graph).await;
+    let v2 = rich_ontology(graph.id(), 2);
+    store.create_and_activate_ontology(&v2).await.unwrap();
+    assert_eq!(
+        store.get_active_ontology(graph.id()).await.unwrap(),
+        Some(v2.clone())
+    );
+
+    // A duplicate version stores nothing and leaves v2 active.
+    let err = store
+        .create_and_activate_ontology(&empty_ontology(graph.id(), 2))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MetadataStoreError::Conflict(_)), "{err}");
+    assert_eq!(
+        store.get_active_ontology(graph.id()).await.unwrap(),
+        Some(v2)
+    );
+
+    let err = store
+        .create_and_activate_ontology(&empty_ontology(GraphId::new(), 2))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MetadataStoreError::NotFound(_)), "{err}");
+}
+
+pub async fn activate_graph_moves_draft_to_active_only(store: &dyn MetadataStore) {
+    let workspace = store.ensure_local_workspace().await.unwrap();
+    let draft = graph_at(workspace.id(), "Draft", now());
+    create(store, &draft).await;
+    let active = store.activate_graph(draft.id()).await.unwrap();
+    assert_eq!(active.status(), GraphStatus::Active);
+    assert!(active.updated_at() >= draft.updated_at());
+    assert_eq!(
+        store.get_graph(draft.id()).await.unwrap(),
+        Some(active.clone())
+    );
+    assert_eq!(
+        store.activate_graph(draft.id()).await.unwrap().status(),
+        GraphStatus::Active
+    );
+
+    let archived = GraphProject::from_parts(
+        GraphId::new(),
+        workspace.id(),
+        "Archived",
+        None,
+        GraphStatus::Archived,
+        now(),
+        now(),
+    )
+    .unwrap();
+    create(store, &archived).await;
+    assert_eq!(
+        store.activate_graph(archived.id()).await.unwrap().status(),
+        GraphStatus::Archived,
+        "archived graphs are not reactivated"
+    );
+    assert!(matches!(
+        store.activate_graph(GraphId::new()).await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+}
+
+pub async fn data_sources_round_trip(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let record = store
+        .get_data_source(graph.id(), source.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.data_source, source);
+    assert_eq!(record.data_source.status(), DataSourceStatus::Pending);
+    assert_eq!(
+        record.storage_key,
+        format!("sources/{}/source", source.id())
+    );
+    assert!(record.profile.is_none());
+    assert!(
+        store
+            .get_data_source(graph.id(), DataSourceId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+pub async fn data_sources_are_scoped_to_their_graph(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let other = graph_at(graph.workspace_id(), "Other", now());
+    create(store, &other).await;
+    assert!(
+        store
+            .get_data_source(other.id(), source.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .mark_data_source_ready(other.id(), source.id(), &profile())
+            .await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.mark_data_source_failed(other.id(), source.id()).await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+    let job = IngestionJob::analysis(other.id(), source.id(), now());
+    assert!(matches!(
+        store.create_job(&job).await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+}
+
+pub async fn data_source_writes_are_validated(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    assert!(matches!(
+        store.create_data_source(&source, "x").await,
+        Err(MetadataStoreError::Conflict(_))
+    ));
+    let orphan = data_source(GraphId::new(), "orphan.csv");
+    assert!(matches!(
+        store.create_data_source(&orphan, "x").await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        store
+            .mark_data_source_ready(graph.id(), DataSourceId::new(), &profile())
+            .await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+}
+
+pub async fn data_source_profiles_follow_status(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let ready = store
+        .mark_data_source_ready(graph.id(), source.id(), &profile())
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), DataSourceStatus::Ready);
+    assert!(ready.updated_at() >= source.updated_at());
+    assert_eq!(ready.created_at(), source.created_at());
+    let record = store
+        .get_data_source(graph.id(), source.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.profile, Some(profile()));
+    assert_eq!(record.data_source, ready);
+
+    let failed = store
+        .mark_data_source_failed(graph.id(), source.id())
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), DataSourceStatus::Failed);
+    let record = store
+        .get_data_source(graph.id(), source.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        record.profile.is_none(),
+        "a failed analysis keeps no profile"
+    );
+}
+
+pub async fn jobs_round_trip_with_pinned_ontology(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let analysis = IngestionJob::analysis(graph.id(), source.id(), now());
+    let ingest = ingestion(graph.id(), source.id(), "key-1");
+    store.create_job(&analysis).await.unwrap();
+    store.create_job(&ingest).await.unwrap();
+    assert_eq!(store.get_job(analysis.id).await.unwrap(), Some(analysis));
+    let stored = store.get_job(ingest.id).await.unwrap().unwrap();
+    assert_eq!(stored, ingest);
+    assert_eq!(stored.ontology_version, Some(OntologyVersion::INITIAL));
+    assert_eq!(stored.mapping, Some(mapping()));
+
+    // Activating a newer version does not change what the job is pinned to.
+    store
+        .create_and_activate_ontology(&rich_ontology(graph.id(), 2))
+        .await
+        .unwrap();
+    let stored = store.get_job(ingest.id).await.unwrap().unwrap();
+    assert_eq!(stored.ontology_version, Some(OntologyVersion::INITIAL));
+    assert!(
+        store
+            .get_job(IngestionJobId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+pub async fn job_creation_is_validated(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let job = IngestionJob::analysis(graph.id(), source.id(), now());
+    store.create_job(&job).await.unwrap();
+    assert!(matches!(
+        store.create_job(&job).await,
+        Err(MetadataStoreError::Conflict(_))
+    ));
+
+    let missing_source = IngestionJob::analysis(graph.id(), DataSourceId::new(), now());
+    assert!(matches!(
+        store.create_job(&missing_source).await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+    let mut unknown_version = ingestion(graph.id(), source.id(), "k");
+    unknown_version.ontology_version = Some(OntologyVersion::new(9).unwrap());
+    assert!(matches!(
+        store.create_job(&unknown_version).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+    let mut running = IngestionJob::analysis(graph.id(), source.id(), now());
+    running.status = JobStatus::Running;
+    assert!(matches!(
+        store.create_job(&running).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+    let mut unpinned = ingestion(graph.id(), source.id(), "k2");
+    unpinned.ontology_version = None;
+    assert!(matches!(
+        store.create_job(&unpinned).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+}
+
+pub async fn job_transitions_are_controlled(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let job = ingestion(graph.id(), source.id(), "k");
+    store.create_job(&job).await.unwrap();
+    assert!(
+        matches!(
+            store.complete_job(job.id, None).await,
+            Err(MetadataStoreError::Conflict(_))
+        ),
+        "queued jobs cannot complete"
+    );
+
+    let running = store.start_job(job.id).await.unwrap();
+    assert_eq!(running.status, JobStatus::Running);
+    assert!(running.updated_at >= job.updated_at);
+    assert!(matches!(
+        store.start_job(job.id).await,
+        Err(MetadataStoreError::Conflict(_))
+    ));
+
+    let summary = IngestionSummary {
+        records_processed: 1000,
+        entities_created: 1000,
+        entities_matched: 200,
+        relationships_created: 980,
+    };
+    let done = store.complete_job(job.id, Some(&summary)).await.unwrap();
+    assert_eq!(done.status, JobStatus::Completed);
+    assert!((done.progress - 1.0).abs() < f64::EPSILON);
+    assert_eq!(done.result, Some(summary));
+    assert_eq!(store.get_job(job.id).await.unwrap(), Some(done));
+    let error = JobError::new("X", "late");
+    for refused in [
+        store.start_job(job.id).await.map(drop),
+        store.fail_job(job.id, &error).await.map(drop),
+        store.complete_job(job.id, None).await.map(drop),
+        store.update_job_progress(job.id, 0.5).await,
+    ] {
+        assert!(
+            matches!(refused, Err(MetadataStoreError::Conflict(_))),
+            "{refused:?}"
+        );
+    }
+
+    // queued → failed and running → failed.
+    let queued = IngestionJob::analysis(graph.id(), source.id(), now());
+    store.create_job(&queued).await.unwrap();
+    let failed = store
+        .fail_job(queued.id, &JobError::new("QUEUE", "rejected"))
+        .await
+        .unwrap();
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(failed.error, Some(JobError::new("QUEUE", "rejected")));
+    let other = IngestionJob::analysis(graph.id(), source.id(), now());
+    store.create_job(&other).await.unwrap();
+    store.start_job(other.id).await.unwrap();
+    store.update_job_progress(other.id, 0.4).await.unwrap();
+    let failed = store.fail_job(other.id, &error).await.unwrap();
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert!(
+        (failed.progress - 0.4).abs() < f64::EPSILON,
+        "progress is kept"
+    );
+
+    assert!(matches!(
+        store.start_job(IngestionJobId::new()).await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+}
+
+pub async fn job_progress_is_monotonic_and_bounded(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let job = IngestionJob::analysis(graph.id(), source.id(), now());
+    store.create_job(&job).await.unwrap();
+    assert!(
+        matches!(
+            store.update_job_progress(job.id, 0.1).await,
+            Err(MetadataStoreError::Conflict(_))
+        ),
+        "only running jobs report progress"
+    );
+    store.start_job(job.id).await.unwrap();
+    let progress = |expected: f64| async move {
+        let stored = store.get_job(job.id).await.unwrap().unwrap().progress;
+        assert!((stored - expected).abs() < 1e-9, "{stored} != {expected}");
+    };
+    store.update_job_progress(job.id, 0.42).await.unwrap();
+    progress(0.42).await;
+    store.update_job_progress(job.id, 0.2).await.unwrap();
+    progress(0.42).await;
+    store.update_job_progress(job.id, -3.0).await.unwrap();
+    progress(0.42).await;
+    store.update_job_progress(job.id, 7.0).await.unwrap();
+    progress(1.0).await;
+    assert!(matches!(
+        store.update_job_progress(job.id, f64::NAN).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+}
+
+pub async fn idempotency_keys_are_unique_per_graph(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let first = ingestion(graph.id(), source.id(), "key-1");
+    store.create_job(&first).await.unwrap();
+    let duplicate = ingestion(graph.id(), source.id(), "key-1");
+    assert!(matches!(
+        store.create_job(&duplicate).await,
+        Err(MetadataStoreError::Conflict(_))
+    ));
+    assert_eq!(
+        store
+            .find_job_by_idempotency_key(graph.id(), "key-1")
+            .await
+            .unwrap(),
+        Some(first)
+    );
+    assert!(
+        store
+            .find_job_by_idempotency_key(graph.id(), "key-2")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The same key is independent in another graph.
+    let other = graph_at(graph.workspace_id(), "Other", now());
+    create(store, &other).await;
+    let other_source = data_source(other.id(), "customers.csv");
+    store.create_data_source(&other_source, "k").await.unwrap();
+    let elsewhere = ingestion(other.id(), other_source.id(), "key-1");
+    store.create_job(&elsewhere).await.unwrap();
+    assert_eq!(
+        store
+            .find_job_by_idempotency_key(other.id(), "key-1")
+            .await
+            .unwrap()
+            .map(|j| j.id),
+        Some(elsewhere.id)
+    );
+}
+
+pub async fn incomplete_jobs_are_failed_on_recovery(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let queued = IngestionJob::analysis(graph.id(), source.id(), now());
+    let running = IngestionJob::analysis(graph.id(), source.id(), now());
+    let completed = IngestionJob::analysis(graph.id(), source.id(), now());
+    for job in [&queued, &running, &completed] {
+        store.create_job(job).await.unwrap();
+    }
+    store.start_job(running.id).await.unwrap();
+    store.start_job(completed.id).await.unwrap();
+    store.complete_job(completed.id, None).await.unwrap();
+
+    let error = JobError::new("PROCESS_RESTARTED", "restarted");
+    assert_eq!(store.mark_incomplete_jobs_failed(&error).await.unwrap(), 2);
+    for id in [queued.id, running.id] {
+        let job = store.get_job(id).await.unwrap().unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.error, Some(error.clone()));
+    }
+    assert_eq!(
+        store.get_job(completed.id).await.unwrap().unwrap().status,
+        JobStatus::Completed
+    );
+    assert_eq!(store.mark_incomplete_jobs_failed(&error).await.unwrap(), 0);
 }

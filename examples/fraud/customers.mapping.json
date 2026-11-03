@@ -1,0 +1,19 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "customer",
+        "entity_type": "Customer",
+        "mode": "create_or_match",
+        "identity": [{ "source_field": "customer_id", "property": "customer_id" }],
+        "properties": [
+          { "source_field": "customer_id", "property": "customer_id" },
+          { "source_field": "name", "property": "name" },
+          { "source_field": "age", "property": "age" },
+          { "source_field": "city", "property": "city" }
+        ]
+      }
+    ],
+    "relationships": []
+  }
+}

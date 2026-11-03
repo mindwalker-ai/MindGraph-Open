@@ -21,8 +21,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{SubsecRound, Utc};
-use mindgraph_core::{MetadataStore, MetadataStoreError};
-use mindgraph_domain::{GraphId, GraphProject, GraphStatus, Ontology, OntologyVersion};
+use mindgraph_core::{IngestionJob, MetadataStore, MetadataStoreError};
+use mindgraph_domain::{
+    DataSource, DataSourceId, DataSourceKind, GraphId, GraphProject, GraphStatus, Ontology,
+    OntologyVersion,
+};
+use mindgraph_ingestion::{EntityMapping, EntityMode, FieldMapping, IngestionMapping};
 use mindgraph_metadata::PostgresMetadataStore;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{AssertSqlSafe, Row};
@@ -314,4 +318,155 @@ async fn database_constraints_protect_integrity() {
         .await;
     let message = update.unwrap_err().to_string();
     assert!(message.contains("immutable"), "{message}");
+}
+
+/// A graph (with ontology v1) and one pending data source.
+async fn graph_and_source(store: &PostgresMetadataStore) -> (GraphProject, DataSource) {
+    let workspace = store.ensure_local_workspace().await.unwrap();
+    let graph = draft(workspace.id(), "Graph");
+    store.create_graph(&graph, &v1(graph.id())).await.unwrap();
+    let source = DataSource::new(
+        DataSourceId::new(),
+        graph.id(),
+        DataSourceKind::Csv,
+        "customers.csv",
+        10,
+        &"a".repeat(64),
+        Utc::now().trunc_subsecs(6),
+    )
+    .unwrap();
+    store
+        .create_data_source(&source, "sources/x/source")
+        .await
+        .unwrap();
+    (graph, source)
+}
+
+fn ingestion_job(graph: &GraphProject, source: &DataSource, key: &str) -> IngestionJob {
+    let field = || FieldMapping {
+        source_field: "customer_id".into(),
+        property: "customer_id".into(),
+    };
+    IngestionJob::ingestion(
+        graph.id(),
+        source.id(),
+        OntologyVersion::INITIAL,
+        key.to_owned(),
+        IngestionMapping {
+            entities: vec![EntityMapping {
+                alias: "customer".into(),
+                entity_type: "Customer".into(),
+                mode: EntityMode::CreateOrMatch,
+                identity: vec![field()],
+                properties: vec![field()],
+            }],
+            relationships: vec![],
+        },
+        Utc::now().trunc_subsecs(6),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 17; see module docs"]
+async fn m4_constraints_protect_data_sources_and_jobs() {
+    let pool = fresh_database().await;
+    let store = PostgresMetadataStore::from_pool(pool.clone());
+    let (graph, source) = graph_and_source(&store).await;
+
+    // A ready data source must have a profile.
+    let ready_without_profile =
+        sqlx::query("UPDATE data_sources SET status = 'ready' WHERE id = $1")
+            .bind(source.id().as_uuid())
+            .execute(&pool)
+            .await;
+    assert!(ready_without_profile.is_err());
+
+    // Checksums are 64 lowercase hex digits.
+    let bad_checksum = sqlx::query("UPDATE data_sources SET content_sha256 = 'XYZ' WHERE id = $1")
+        .bind(source.id().as_uuid())
+        .execute(&pool)
+        .await;
+    assert!(bad_checksum.is_err());
+
+    let job = ingestion_job(&graph, &source, "k");
+    store.create_job(&job).await.unwrap();
+    for (sql, what) in [
+        (
+            "UPDATE ingestion_jobs SET status = 'failed' WHERE id = $1",
+            "failed needs an error",
+        ),
+        (
+            "UPDATE ingestion_jobs SET status = 'completed' WHERE id = $1",
+            "completed needs progress 1",
+        ),
+        (
+            "UPDATE ingestion_jobs SET ontology_version = NULL WHERE id = $1",
+            "ingest jobs are pinned",
+        ),
+        (
+            "UPDATE ingestion_jobs SET ontology_version = 7 WHERE id = $1",
+            "the pinned version exists",
+        ),
+        (
+            "UPDATE ingestion_jobs SET kind = 'export' WHERE id = $1",
+            "kind is constrained",
+        ),
+        (
+            "UPDATE ingestion_jobs SET result_json = '{}' WHERE id = $1",
+            "results only when completed",
+        ),
+    ] {
+        let result = sqlx::query(sql).bind(job.id.as_uuid()).execute(&pool).await;
+        assert!(result.is_err(), "{what}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 17; see module docs"]
+async fn corrupt_job_json_is_reported_as_corrupt_data() {
+    let pool = fresh_database().await;
+    let store = PostgresMetadataStore::from_pool(pool.clone());
+    let (graph, source) = graph_and_source(&store).await;
+    let job = ingestion_job(&graph, &source, "k");
+    store.create_job(&job).await.unwrap();
+    sqlx::query("UPDATE ingestion_jobs SET mapping_json = '{\"entities\": 3}' WHERE id = $1")
+        .bind(job.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.get_job(job.id).await,
+        Err(MetadataStoreError::CorruptData(_))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 17; see module docs"]
+async fn concurrent_jobs_with_one_idempotency_key_store_one_job() {
+    let pool = fresh_database().await;
+    let store = Arc::new(PostgresMetadataStore::from_pool(pool.clone()));
+    let (graph, source) = graph_and_source(&store).await;
+    let attempts: Vec<_> = (0..8)
+        .map(|_| {
+            let store = Arc::clone(&store);
+            let job = ingestion_job(&graph, &source, "same-key");
+            tokio::spawn(async move { store.create_job(&job).await })
+        })
+        .collect();
+    let mut created = 0;
+    for attempt in attempts {
+        match attempt.await.unwrap() {
+            Ok(()) => created += 1,
+            Err(MetadataStoreError::Conflict(_)) => {}
+            Err(other) => panic!("{other}"),
+        }
+    }
+    assert_eq!(created, 1);
+    let rows = count(
+        &pool,
+        "SELECT count(*) FROM ingestion_jobs WHERE graph_id = $1",
+        graph.id().as_uuid(),
+    )
+    .await;
+    assert_eq!(rows, 1);
 }

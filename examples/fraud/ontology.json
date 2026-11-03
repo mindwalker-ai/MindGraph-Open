@@ -1,0 +1,32 @@
+{
+  "entity_types": [
+    {
+      "name": "Customer",
+      "display_name": "Customer",
+      "properties": [
+        { "name": "customer_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true },
+        { "name": "age", "type": "integer", "required": false },
+        { "name": "city", "type": "string", "required": false }
+      ]
+    },
+    {
+      "name": "Account",
+      "display_name": "Bank Account",
+      "properties": [
+        { "name": "account_id", "type": "string", "required": true },
+        { "name": "account_type", "type": "string", "required": false },
+        { "name": "balance", "type": "float", "required": false },
+        { "name": "opened_at", "type": "datetime", "required": false }
+      ]
+    }
+  ],
+  "relationship_types": [
+    {
+      "name": "OWNS",
+      "source_entity_type": "Customer",
+      "target_entity_type": "Account",
+      "properties": []
+    }
+  ]
+}

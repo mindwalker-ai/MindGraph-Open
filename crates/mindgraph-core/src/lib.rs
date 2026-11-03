@@ -9,19 +9,37 @@
 //!                  │
 //!                  ▼
 //!            mindgraph-core ── MetadataStore (port) ◄── mindgraph-metadata (PostgreSQL)
-//!                  │
+//!                  │        ── GraphStore (port)    ◄── HugeGraphStore (mindgraph-graph)
+//!                  │        ── SourceStore (port)   ◄── LocalSourceStore (mindgraph-ingestion)
 //!                  ▼
-//!           mindgraph-domain
+//!   mindgraph-ingestion (deterministic engine) ─► mindgraph-domain
 //! ```
 //!
-//! This crate has no dependency on Axum, SQLx or PostgreSQL types.
+//! This crate has no dependency on Axum, SQLx, PostgreSQL or HTTP client
+//! types. It uses Tokio only to run background jobs in-process.
 
 #![warn(missing_docs)]
 
+mod error;
 mod graph_projects;
+mod ingestion;
+mod jobs;
+mod memory;
 mod metadata;
+mod ontology;
 
+pub use error::{ApplicationError, BoxError};
 pub use graph_projects::{
-    ApplicationError, CreateGraphProject, DEFAULT_LIST_LIMIT, GraphProjectService, MAX_LIST_LIMIT,
+    CreateGraphProject, DEFAULT_LIST_LIMIT, GraphProjectService, MAX_LIST_LIMIT,
 };
-pub use metadata::{LOCAL_WORKSPACE_NAME, MemoryMetadataStore, MetadataStore, MetadataStoreError};
+pub use ingestion::{
+    DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_QUEUE_CAPACITY,
+    DataSourceView, IngestionConfig, IngestionPorts, IngestionService, MAX_BATCH_SIZE,
+    MAX_IDEMPOTENCY_KEY_CHARS, PROCESS_RESTARTED, UploadSession,
+};
+pub use jobs::{IngestionJob, JobError, JobKind, JobStatus, MAX_JOB_ERROR_CHARS};
+pub use memory::MemoryMetadataStore;
+pub use metadata::{DataSourceRecord, LOCAL_WORKSPACE_NAME, MetadataStore, MetadataStoreError};
+pub use ontology::{
+    EntityTypeInput, OntologyDefinition, OntologyService, PropertyInput, RelationshipTypeInput,
+};
