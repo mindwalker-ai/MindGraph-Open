@@ -4,7 +4,7 @@
 
 <p align="center"><strong>Open-source Graph Intelligence for humans and AI agents.</strong></p>
 
-MindGraph Open turns messy, structured data into an explorable knowledge graph.
+MindGraph-OSS turns messy, structured data into an explorable knowledge graph.
 You can then investigate relationships visually, ask questions with GraphRAG, and
 connect your AI agents through MCP.
 
