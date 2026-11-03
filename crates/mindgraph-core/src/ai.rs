@@ -1,14 +1,16 @@
 //! The AI Graph Builder port (ADR-007, M5).
 //!
-//! The application asks an AI service for a *suggestion*: an ontology draft
-//! plus an M4 [`IngestionMapping`]. AI suggests, Rust validates, the user
-//! reviews, and the deterministic M4 engine executes. Nothing behind this
-//! port can write graph data, ontologies or mappings.
+//! The application asks an AI service for a *suggestion* over one or more
+//! analysed datasets: one ontology draft plus one M4 [`IngestionMapping`] per
+//! dataset. AI suggests, Rust validates, the user reviews, and the
+//! deterministic M4 engine executes, one dataset at a time. Nothing behind
+//! this port can write graph data, ontologies or mappings.
 //!
 //! The port carries no transport types: the HTTP adapter lives in the
 //! `mindgraph-ai-client` crate.
 
 use async_trait::async_trait;
+use mindgraph_domain::DataSourceId;
 use mindgraph_ingestion::{DatasetProfile, IngestionMapping};
 use serde::{Deserialize, Serialize};
 
@@ -99,15 +101,26 @@ pub struct RepairContext {
     pub errors: Vec<String>,
 }
 
+/// One analysed dataset as the AI sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetContext {
+    /// A label unique within the request, derived from the uploaded
+    /// filename (for example `customers.csv`). Suggestions refer to datasets
+    /// by this label.
+    pub name: String,
+    /// The M4 profile: field names, inferred types, nullability and bounded
+    /// samples.
+    pub profile: DatasetProfile,
+}
+
 /// Everything the AI receives: bounded, structured context only. Never the
-/// source file, filesystem paths, graph contents or credentials.
+/// source files, filesystem paths, graph contents or credentials.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphBuilderRequest {
     /// Propagated as the request id (the job id).
     pub correlation_id: String,
-    /// The M4 profile: field names, inferred types, nullability and bounded
-    /// samples.
-    pub dataset_profile: DatasetProfile,
+    /// The datasets to model together, in the order the client gave them.
+    pub datasets: Vec<DatasetContext>,
     /// The pinned active ontology.
     pub active_ontology: OntologyContext,
     /// Set for a repair attempt.
@@ -143,16 +156,32 @@ pub struct SuggestionAnnotations {
     pub relationships: Vec<TypeAnnotation>,
 }
 
-/// An AI Graph Builder suggestion. `ontology` is the complete proposed next
-/// version (the same shape as `POST /graphs/{id}/ontology`), `mapping` is an
-/// unchanged M4 ingestion mapping.
+/// The M4 mapping of one dataset of a suggestion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DatasetMapping {
+    /// The dataset label from the request.
+    pub dataset: String,
+    /// The data source the label stands for. Set by Rust validation, never
+    /// by the AI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<DataSourceId>,
+    /// How each record of the dataset maps onto the proposed ontology.
+    pub mapping: IngestionMapping,
+}
+
+/// An AI Graph Builder suggestion. `ontology` is the complete proposed next
+/// version (the same shape as `POST /graphs/{id}/ontology`); `mappings` holds
+/// one unchanged M4 ingestion mapping per dataset, in a safe ingestion order
+/// once validated (datasets that create a type before datasets that only
+/// match it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "SuggestionWire")]
 pub struct GraphBuilderSuggestion {
     /// The proposed ontology: existing types kept, new types added.
     pub ontology: OntologyDefinition,
-    /// How each record maps onto the proposed ontology.
-    pub mapping: IngestionMapping,
+    /// One mapping per dataset.
+    pub mappings: Vec<DatasetMapping>,
     /// Overall model confidence, `0.0..=1.0`.
     pub confidence: f64,
     /// Per-type confidence and reasons.
@@ -161,6 +190,48 @@ pub struct GraphBuilderSuggestion {
     /// Short, bounded warnings for the reviewer.
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+/// The accepted wire shapes of a suggestion: `mappings`, or the single
+/// `mapping` of suggestions stored before multi-dataset support (its data
+/// source is the job's first one; the store fills it in).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestionWire {
+    ontology: OntologyDefinition,
+    #[serde(default)]
+    mappings: Option<Vec<DatasetMapping>>,
+    #[serde(default)]
+    mapping: Option<IngestionMapping>,
+    confidence: f64,
+    #[serde(default)]
+    annotations: SuggestionAnnotations,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+impl TryFrom<SuggestionWire> for GraphBuilderSuggestion {
+    type Error = &'static str;
+
+    fn try_from(wire: SuggestionWire) -> Result<Self, Self::Error> {
+        let mappings = match (wire.mappings, wire.mapping) {
+            (Some(mappings), None) => mappings,
+            (None, Some(mapping)) => vec![DatasetMapping {
+                dataset: String::new(),
+                data_source_id: None,
+                mapping,
+            }],
+            (Some(_), Some(_)) => return Err("a suggestion has either `mappings` or `mapping`"),
+            (None, None) => return Err("a suggestion needs `mappings`"),
+        };
+        Ok(Self {
+            ontology: wire.ontology,
+            mappings,
+            confidence: wire.confidence,
+            annotations: wire.annotations,
+            warnings: wire.warnings,
+        })
+    }
 }
 
 /// Where a suggestion came from.

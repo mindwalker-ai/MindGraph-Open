@@ -428,14 +428,14 @@ Web (Graph Builder) ──/api/v1 proxy──► mindgraph-api
             GraphBuilderAi (port) ◄── HttpGraphBuilderAi (mindgraph-ai-client, reqwest)
                                           │ POST /internal/v1/graph-builder/suggest
                                           ▼
-                       mindgraph-ai (FastAPI): prompt graph_builder_v1
+                       mindgraph-ai (FastAPI): prompt graph_builder_v2
                           LLMProvider ◄── OpenAICompatibleProvider (httpx2)
                                           │ POST {base_url}/chat/completions
                                           ▼
                               any OpenAI-compatible model server
         result: strict JSON ─► Pydantic ─► Rust validation ─► job result (a draft)
 
-User reviews/edits the draft ─► POST /graphs/{id}/ontology ─► POST .../ingestions ─► M4 engine
+User reviews/edits the draft ─► POST /graphs/{id}/ontology ─► POST .../ingestions (per file) ─► M4 engine
 ```
 
 ### Boundaries
@@ -453,11 +453,14 @@ clients in `mindgraph-core`.
 
 ### What the model receives
 
-The request is the bounded M4 profile plus the pinned ontology:
+One request models 1–10 analysed files together. Per file: its filename as
+a label (made unique with ` (n)`) and the bounded M4 profile; plus the
+pinned ontology:
 
 - field names, inferred types, nullability and non-null counts;
 - up to 5 sample values per field (each at most 200 characters);
-- up to 10 sample rows (fewer if the profile would exceed 96 KiB);
+- up to 10 sample rows (fewer if a profile would exceed its share of a
+  320 KiB budget, at most 96 KiB per file; then fewer sample values);
 - the active ontology's types (names, properties, endpoints), without ids.
 
 Never the source file, other records, filesystem paths, graph contents or
@@ -465,9 +468,13 @@ credentials. Requests are user-triggered only (the AI Model step or the API).
 
 ### Prompt
 
-`graph_builder_v1` (returned as `prompt_version` with every result). The
-system prompt tells the model to treat everything inside `<context>` as
-untrusted data, to model entities conservatively (no entity per field),
+`graph_builder_v2` (returned as `prompt_version` with every result; v1
+modelled a single file). The system prompt tells the model to treat
+everything inside `<context>` as untrusted data, to model all files as one
+ontology (one type per real-world thing across files), to return exactly
+one mapping per file, to put a cross-file relationship in the file whose
+records hold both identifiers, to model entities conservatively (no entity
+per field),
 to prefer `*_id` identifiers typed as strings (leading zeros), to keep the
 existing ontology intact, to use `match_only` for references to existing
 types, to infer relationships only from evidence, and to output exactly one
@@ -484,8 +491,13 @@ is embedded with `<` and `>` escaped, so sample text cannot close the block.
    the domain constructors on top of the pinned base version; the base must
    be preserved (no removed types or relationship types, no changed property
    types, requiredness or endpoints, new properties of existing types
-   optional); the mapping must pass M4's `validate_mapping` against the
-   profile's fields. Rust also sets each annotation's `existing` flag itself.
+   optional); every file needs exactly one mapping, and each must pass M4's
+   `validate_mapping` against that file's fields; a `match_only` type must
+   exist already or be created by one of the files; files must not only
+   match what each other creates (a cycle). Rust sets each annotation's
+   `existing` flag itself, links each mapping to its data source and orders
+   the mappings safely (files that create a type before files that only
+   match it).
 
 If Rust rejects a suggestion, the concise errors (never stack traces, SQL,
 paths, URLs or secrets) and the previous suggestion are sent back for at
@@ -514,9 +526,16 @@ the job fails with `AI_VALIDATION_FAILED`.
   own queue (64) and `MINDGRAPH_AI_JOB_CONCURRENCY` (2, at most 8), so slow
   model calls never delay dataset jobs. A result the job store refuses fails
   the job with `RESULT_NOT_RECORDED` instead of leaving it `running`.
-- **Idempotency**: required `Idempotency-Key`; the same key for the same data
-  source returns the original job without another provider call; another
-  data source or job kind is `409`.
+- **Data sources**: `POST /graphs/{id}/graph-builder/suggestions` with
+  `{"data_source_ids": [...]}` (1–10, distinct, all analysed); the
+  per-data-source endpoint is the one-file shorthand. The first id is the
+  job's `data_source_id`; all of them, in order, are stored in
+  `ingestion_job_data_sources` (migration
+  `20261104120000_multi_dataset_suggestions.sql`, foreign keys to the job
+  and to data sources of the same graph) and returned as `data_source_ids`.
+- **Idempotency**: required `Idempotency-Key`; the same key with the same
+  data sources in the same order returns the original job without another
+  provider call; anything else with that key is `409`.
 - **Pinning**: the active ontology version is stored on the job; the worker
   loads exactly that version, and the result records it as
   `ontology_version_base`.
@@ -529,31 +548,50 @@ the job fails with `AI_VALIDATION_FAILED`.
   AI service schema (50 errors of at most 500 characters).
 - **Restart**: `ai_suggest` jobs left `queued` or `running` fail with
   `PROCESS_RESTARTED`, like every other kind.
-- **Preflight** (`503 AI_NOT_CONFIGURED` / `AI_UNAVAILABLE`, `409` if the data
+- **Preflight** (`503 AI_NOT_CONFIGURED` / `AI_UNAVAILABLE`, `409` if a data
   source is not analysed) runs before a job is created.
+- **Earlier results**: suggestions stored before multi-file support (one
+  `mapping`) still decode, as one mapping of the job's data source.
 
-### Graph Builder UI
+### Web UI
 
-`/graphs/{graph_id}/builder` (Next.js client component). Steps: Data
-(upload), Analyze (profile table), AI Model (suggest or build manually),
-Review (entities and relationships with confidence bands and
-Existing/New badges, warnings; edit names, properties, types, required,
-identity, source fields, modes, endpoints; add and delete), Generate.
-**Generate Graph** validates the draft locally, posts the ontology with
-`expected_version` set to the draft's base version (skipped when unchanged;
-the server rejects a stale base atomically with `409`), then
-posts the mapping as an ingestion with one idempotency key and follows the
-job. If the ingestion cannot start after the ontology was saved, the page
-says so and **Retry ingestion** reuses the same key without creating another
-ontology version. `/graphs/{graph_id}/explore` is a placeholder for M6.
+The screens follow the MindGraph Open design (Titillium Web, IBM Plex
+Mono, the dark token palette, Lucide icons, a 220px sidebar or a 52px
+rail). Destinations of later milestones (Graph Explorer, Ask, GraphRAG,
+MCP, templates, the demo) are shown disabled with the milestone in their
+tooltip.
+
+- `/`: the welcome screen until a graph exists, then "Your Graphs" (cards
+  drawn from each graph's ontology; instance counts arrive with M6).
+- `/graphs/new`: name and how to start (CSV, JSON, or an empty ontology).
+- `/graphs/{id}/upload`: drop several files; each is uploaded and analysed
+  at once (rows, columns, headers, preview). The ids live in `?sources=`,
+  so a reload keeps them.
+- `/graphs/{id}/builder?sources=…`: the AI Graph Builder. "Generate Graph
+  Model" asks for one suggestion over all files (or "Build manually"). The
+  review shows entity types (left), the ontology preview canvas with a YAML
+  view (centre) and an inspector (right: definition, properties, source
+  fields per file, keys, sample matches from the profiles, the cross-file
+  join). The draft keeps the ontology and one mapping per file, linked by
+  stable keys. Without `?sources=` it edits the ontology alone.
+
+**Generate Graph** validates the draft locally and locks it, posts the
+ontology with `expected_version` set to the draft's base version (skipped
+when unchanged; the server rejects a stale base atomically with `409`), then
+ingests each mapped file in a safe order, one idempotency key per file. A
+file that cannot start keeps its key for **Retry ingestion**; files already
+ingested are never ingested twice. `/graphs/{id}/explore` is a placeholder
+for M6.
 
 ### Known M5 limitations
 
 - One provider kind (OpenAI-compatible); no streaming of model output.
-- Suggestions cover one dataset at a time and are not stored as reusable
-  drafts beyond the job result; the review draft lives in the browser tab.
-- The UI keeps the uploaded data source in page state: reloading the page
-  starts a new upload.
+- Suggestions are not stored as reusable drafts beyond the job result; the
+  review draft lives in the browser tab.
+- Relationship cardinality and match statistics are not computed yet (shown
+  disabled); sample matches come from the bounded profiles only.
+- There is no API to list a graph's data sources yet: the upload page
+  restores files from `?sources=` only.
 - Confidence values are the model's own estimates, not calibrated
   probabilities.
 - `/ready` of core does not include the AI service (AI is optional); see

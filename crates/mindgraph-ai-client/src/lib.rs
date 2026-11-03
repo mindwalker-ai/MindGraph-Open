@@ -11,8 +11,8 @@
 //! ```
 //!
 //! The AI service is internal: it is reached over the Docker network and is
-//! never published. Requests carry only the bounded dataset profile and the
-//! active ontology. Responses are decoded into explicit DTOs; anything else
+//! never published. Requests carry only the bounded dataset profiles (with
+//! their filename labels) and the active ontology. Responses are decoded into explicit DTOs; anything else
 //! is an invalid response. `reqwest` types never leave this crate.
 
 #![warn(missing_docs)]
@@ -21,10 +21,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mindgraph_core::{
-    AiError, AiMetadata, AiStatus, AiSuggestion, GraphBuilderAi, GraphBuilderRequest,
-    GraphBuilderSuggestion, OntologyContext, RepairContext,
+    AiError, AiMetadata, AiStatus, AiSuggestion, DatasetContext, GraphBuilderAi,
+    GraphBuilderRequest, GraphBuilderSuggestion, OntologyContext, RepairContext,
 };
-use mindgraph_ingestion::DatasetProfile;
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -104,7 +103,7 @@ impl HttpGraphBuilderAi {
 /// `POST /internal/v1/graph-builder/suggest` request body.
 #[derive(Debug, Serialize)]
 struct SuggestRequestDto<'a> {
-    dataset_profile: &'a DatasetProfile,
+    datasets: &'a [DatasetContext],
     active_ontology: &'a OntologyContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     repair: Option<&'a RepairContext>,
@@ -233,7 +232,7 @@ impl GraphBuilderAi for HttpGraphBuilderAi {
 
     async fn suggest(&self, request: &GraphBuilderRequest) -> Result<AiSuggestion, AiError> {
         let body = SuggestRequestDto {
-            dataset_profile: &request.dataset_profile,
+            datasets: &request.datasets,
             active_ontology: &request.active_ontology,
             repair: request.repair.as_ref(),
         };

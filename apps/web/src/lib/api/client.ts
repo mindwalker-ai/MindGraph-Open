@@ -47,9 +47,10 @@ export interface ApiClient {
   getDataSource(graphId: string, dataSourceId: string): Promise<DataSource>;
   analyze(graphId: string, dataSourceId: string): Promise<JobAccepted>;
   graphBuilderStatus(): Promise<GraphBuilderStatus>;
+  /** One AI suggestion that models the analysed data sources together. */
   requestSuggestion(
     graphId: string,
-    dataSourceId: string,
+    dataSourceIds: string[],
     idempotencyKey: string,
   ): Promise<JobAccepted>;
   startIngestion(
@@ -134,11 +135,11 @@ export function createApiClient(
     analyze: (graphId, dataSourceId) =>
       call(`/graphs/${graphId}/data-sources/${dataSourceId}/analyze`, { method: "POST" }),
     graphBuilderStatus: () => call("/graph-builder/status"),
-    requestSuggestion: (graphId, dataSourceId, idempotencyKey) =>
-      call(`/graphs/${graphId}/data-sources/${dataSourceId}/graph-builder/suggestions`, {
-        method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey },
-      }),
+    requestSuggestion: (graphId, dataSourceIds, idempotencyKey) =>
+      call(
+        `/graphs/${graphId}/graph-builder/suggestions`,
+        json("POST", { data_source_ids: dataSourceIds }, { "Idempotency-Key": idempotencyKey }),
+      ),
     startIngestion: (graphId, dataSourceId, mapping, idempotencyKey) =>
       call(
         `/graphs/${graphId}/data-sources/${dataSourceId}/ingestions`,

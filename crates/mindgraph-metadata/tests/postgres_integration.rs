@@ -120,6 +120,7 @@ async fn migrations_create_every_table_and_are_idempotent() {
         [
             "data_sources",
             "graph_projects",
+            "ingestion_job_data_sources",
             "ingestion_jobs",
             "ontology_versions",
             "saved_views",
@@ -469,4 +470,85 @@ async fn concurrent_jobs_with_one_idempotency_key_store_one_job() {
     )
     .await;
     assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 17; see module docs"]
+async fn single_mapping_suggestions_stored_before_multi_dataset_still_decode() {
+    let pool = fresh_database().await;
+    let store = PostgresMetadataStore::from_pool(pool.clone());
+    let (graph, source) = graph_and_source(&store).await;
+    let job = IngestionJob::graph_builder(
+        graph.id(),
+        vec![source.id()],
+        OntologyVersion::INITIAL,
+        "legacy".into(),
+        Utc::now().trunc_subsecs(6),
+    );
+    store.create_job(&job).await.unwrap();
+    // An M5 job: no listed data sources and a single `mapping`.
+    sqlx::query("DELETE FROM ingestion_job_data_sources WHERE job_id = $1")
+        .bind(job.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy = serde_json::json!({
+        "prompt_version": "graph_builder_v1", "provider": "p", "model": "m",
+        "ontology_version_base": 1, "repair_attempts": 0,
+        "suggestion": {
+            "ontology": {"entity_types": [], "relationship_types": []},
+            "mapping": {"entities": [], "relationships": []},
+            "confidence": 0.5, "annotations": {"entities": [], "relationships": []},
+            "warnings": []
+        }
+    });
+    sqlx::query(
+        "UPDATE ingestion_jobs SET status = 'completed', progress = 1, result_json = $2 \
+         WHERE id = $1",
+    )
+    .bind(job.id.as_uuid())
+    .bind(legacy)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stored = store.get_job(job.id).await.unwrap().unwrap();
+    assert_eq!(stored.data_source_ids, [source.id()]);
+    let mappings = &stored.graph_builder_result().unwrap().suggestion.mappings;
+    assert_eq!(mappings.len(), 1);
+    assert_eq!(mappings[0].data_source_id, Some(source.id()));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 17; see module docs"]
+async fn job_data_sources_must_belong_to_the_job_graph() {
+    let pool = fresh_database().await;
+    let store = PostgresMetadataStore::from_pool(pool.clone());
+    let (graph, source) = graph_and_source(&store).await;
+    let job = IngestionJob::graph_builder(
+        graph.id(),
+        vec![source.id()],
+        OntologyVersion::INITIAL,
+        "k".into(),
+        Utc::now().trunc_subsecs(6),
+    );
+    store.create_job(&job).await.unwrap();
+    for (sql, what) in [
+        (
+            "UPDATE ingestion_job_data_sources SET graph_id = gen_random_uuid() WHERE job_id = $1",
+            "same graph as the job",
+        ),
+        (
+            "UPDATE ingestion_job_data_sources SET position = 10 WHERE job_id = $1",
+            "at most 10 data sources",
+        ),
+        (
+            "INSERT INTO ingestion_job_data_sources (job_id, graph_id, position, data_source_id) \
+             SELECT job_id, graph_id, 1, data_source_id FROM ingestion_job_data_sources \
+             WHERE job_id = $1",
+            "each data source once",
+        ),
+    ] {
+        let result = sqlx::query(sql).bind(job.id.as_uuid()).execute(&pool).await;
+        assert!(result.is_err(), "{what}");
+    }
 }

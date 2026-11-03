@@ -360,15 +360,17 @@ impl MetadataStore for MemoryMetadataStore {
         job.validate_new()
             .map_err(MetadataStoreError::InvalidInput)?;
         let mut state = self.state();
-        let source_in_graph = state
-            .data_sources
-            .get(&job.data_source_id)
-            .is_some_and(|record| record.data_source.graph_id() == job.graph_id);
-        if !source_in_graph {
-            return Err(MetadataStoreError::NotFound(format!(
-                "data source {} of graph {}",
-                job.data_source_id, job.graph_id
-            )));
+        for source in &job.data_source_ids {
+            let source_in_graph = state
+                .data_sources
+                .get(source)
+                .is_some_and(|record| record.data_source.graph_id() == job.graph_id);
+            if !source_in_graph {
+                return Err(MetadataStoreError::NotFound(format!(
+                    "data source {source} of graph {}",
+                    job.graph_id
+                )));
+            }
         }
         if let Some(version) = job.ontology_version
             && !state.ontologies.contains_key(&(job.graph_id, version))

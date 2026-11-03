@@ -330,6 +330,71 @@ paths:
         "415": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/graph-builder/suggestions:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    post:
+      tags: [graph-builder]
+      operationId: requestGraphSuggestion
+      summary: Ask the AI Graph Builder to model several data sources together
+      description: |
+        Starts one `ai_suggest` job for 1–10 distinct analysed (`ready`) data
+        sources of the graph, pinned to the graph's active ontology version.
+        The AI proposes one ontology for all of them (the same real-world
+        thing gets one entity type across files) and one mapping per data
+        source, with cross-file relationships placed in the data source whose
+        records hold both identifiers.
+
+        The AI receives, per data source, its profile (field names, inferred
+        types, nullability, non-null counts, up to 5 sample values per field
+        and up to 10 sample rows) and its filename as a label, plus the
+        active ontology. Never the files, other records or graph contents.
+
+        The result is a validated draft: apply the reviewed ontology with
+        `POST .../ontology` (with `expected_version`), then each mapping, in
+        the returned order, with `POST .../data-sources/{data_source_id}/ingestions`.
+
+        The same `Idempotency-Key` (per graph) with the same data sources in
+        the same order returns the original job without another provider
+        call; anything else with that key is `409 CONFLICT`.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: 1–255 visible ASCII characters chosen by the client, e.g. a UUID.
+          schema: { type: string, minLength: 1, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SuggestionRequest" }
+            example:
+              data_source_ids:
+                - 019a0000-0000-7000-8000-000000000001
+                - 019a0000-0000-7000-8000-000000000002
+      responses:
+        "202":
+          description: The suggestion job was queued (or the original job for a repeated key).
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+            Location:
+              description: URL of the job.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAccepted" }
+        "400":
+          description: |
+            `MISSING_IDEMPOTENCY_KEY`, `INVALID_DATA_SOURCE_ID`, `INVALID_JSON`,
+            or `INVALID_REQUEST` (no data sources, more than 10, or duplicates).
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /api/v1/graphs/{graph_id}/data-sources/{data_source_id}/graph-builder/suggestions:
     parameters:
       - $ref: "#/components/parameters/GraphId"
@@ -337,14 +402,17 @@ paths:
     post:
       tags: [graph-builder]
       operationId: requestGraphBuilderSuggestion
-      summary: Ask the AI Graph Builder for an ontology and mapping suggestion
+      summary: Ask the AI Graph Builder for a suggestion for one data source
       description: |
+        Shorthand for `POST /api/v1/graphs/{graph_id}/graph-builder/suggestions`
+        with `{"data_source_ids": [data_source_id]}`.
+
         Starts an `ai_suggest` job for an analysed (`ready`) data source,
         pinned to the graph's active ontology version. The AI receives only
         the dataset profile (field names, inferred types, nullability,
         non-null counts, up to 5 sample values per field and up to 10 sample
-        rows) and the active ontology. Never the file, other records or graph
-        contents.
+        rows), its filename as a label, and the active ontology. Never the
+        file, other records or graph contents.
 
         The result (read with `GET /api/v1/jobs/{job_id}`) is a suggestion that
         passed MindGraph's own validation: existing types kept, the mapping
@@ -626,6 +694,17 @@ components:
           type: array
           default: []
           items: { $ref: "#/components/schemas/PropertyDefinition" }
+    SuggestionRequest:
+      type: object
+      required: [data_source_ids]
+      additionalProperties: false
+      properties:
+        data_source_ids:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items: { type: string, format: uuid }
     CreateOntologyRequest:
       type: object
       required: [entity_types]
@@ -795,7 +874,16 @@ components:
       properties:
         id: { type: string, format: uuid }
         graph_id: { type: string, format: uuid }
-        data_source_id: { type: string, format: uuid }
+        data_source_id:
+          type: string
+          format: uuid
+          description: The data source the job reads; for an AI suggestion over several, the first.
+        data_source_ids:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { type: string, format: uuid }
+          description: Every data source the job reads, in the client's order.
         kind: { type: string, enum: [analyze, ingest, ai_suggest] }
         status: { type: string, enum: [queued, running, completed, failed, cancelled] }
         progress: { type: number, minimum: 0, maximum: 1, description: Never decreases; 1 when completed. }
@@ -839,9 +927,20 @@ components:
           description: The model's own confidence estimate; not a statistical guarantee.
         reason: { type: string, maxLength: 300 }
         existing: { type: boolean, description: Set by MindGraph from the base ontology, not by the model. }
+    DatasetMapping:
+      type: object
+      required: [dataset, data_source_id, mapping]
+      properties:
+        dataset:
+          type: string
+          description: The dataset's label in the AI request (its filename, made unique with ` (n)`).
+        data_source_id: { type: string, format: uuid }
+        mapping:
+          $ref: "#/components/schemas/IngestionMapping"
+          description: An unchanged M4 ingestion mapping, valid against this dataset's profile.
     GraphBuilderSuggestion:
       type: object
-      required: [ontology, mapping, confidence, annotations, warnings]
+      required: [ontology, mappings, confidence, annotations, warnings]
       properties:
         ontology:
           $ref: "#/components/schemas/CreateOntologyRequest"
@@ -850,9 +949,16 @@ components:
             `POST /api/v1/graphs/{graph_id}/ontology`. Existing types,
             property types, requiredness and relationship endpoints are kept;
             only new types and optional properties are added.
-        mapping:
-          $ref: "#/components/schemas/IngestionMapping"
-          description: An unchanged M4 ingestion mapping, valid against the dataset profile.
+        mappings:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { $ref: "#/components/schemas/DatasetMapping" }
+          description: |
+            One mapping per data source of the job, in a safe ingestion order:
+            a data source that only matches (`match_only`) an entity type comes
+            after the data sources that create it. Ingest them in this order,
+            each with `POST .../data-sources/{data_source_id}/ingestions`.
         confidence: { type: number, minimum: 0, maximum: 1 }
         annotations:
           type: object
@@ -875,7 +981,7 @@ components:
       required: [prompt_version, provider, model, ontology_version_base, repair_attempts, suggestion]
       description: The result of an `ai_suggest` job. Never the prompt, the raw provider response or any reasoning.
       properties:
-        prompt_version: { type: string, example: graph_builder_v1 }
+        prompt_version: { type: string, example: graph_builder_v2 }
         provider: { type: string, example: openai_compatible }
         model: { type: string }
         ontology_version_base: { type: integer, minimum: 1 }
