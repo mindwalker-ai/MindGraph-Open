@@ -3,8 +3,8 @@
 Python + FastAPI service that owns AI-specific intelligence (ADR-001,
 ADR-007). It is an **internal coprocessor**: only MindGraph Core calls it,
 over the Docker network. It is never published, and it never reads source
-files or writes PostgreSQL, HugeGraph or anything else. It turns a bounded
-dataset profile into a validated **suggestion**; MindGraph Core validates it
+files or writes PostgreSQL, HugeGraph or anything else. It turns the bounded
+profiles of one or more datasets into one validated **suggestion**; MindGraph Core validates it
 again, the user reviews it, and the deterministic M4 engine executes it.
 
 ## Endpoints
@@ -34,7 +34,7 @@ mindgraph_ai/
 │   ├── base.py              LLMProvider protocol, strict JSON parsing
 │   └── openai_compatible.py POST {base_url}/chat/completions with bounded retries
 └── graph_builder/
-    ├── prompts.py           prompt graph_builder_v1, untrusted-data handling
+    ├── prompts.py           prompt graph_builder_v2, untrusted-data handling
     └── service.py           provider → strict JSON → Pydantic → response
 ```
 
@@ -58,14 +58,16 @@ invalid_configuration`.
 
 ## What the model receives
 
-Only what MindGraph Core sends: field names, inferred types, nullability,
-non-null counts, up to 5 sample values per field, up to 10 sample rows and
-the active ontology (types without ids). The prompt marks this as untrusted
+Only what MindGraph Core sends: 1–10 datasets, each with its filename as a
+label and its profile (field names, inferred types, nullability, non-null
+counts, up to 5 sample values per field, up to 10 sample rows), and the
+active ontology (types without ids). The suggestion has one ontology and one
+`mappings` entry per dataset (`{"dataset": <label>, "mapping": {...}}`). The prompt marks this as untrusted
 data, escapes `<`/`>` inside it, and asks for one JSON object without
 reasoning or markdown. The model has no tools. Output that is not exactly one
 JSON object, or that fails the schema (unknown fields, invalid names,
 confidences outside `0..=1`, more than 25 entity types, 50 relationship
-types, 100 properties per type or 20 warnings), is rejected.
+types, 100 properties per type, 10 mappings or 20 warnings), is rejected.
 
 Logs contain request ids, provider, model, prompt version, field and record
 counts, durations, retry counts and outcomes, never prompts, samples,

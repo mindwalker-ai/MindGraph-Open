@@ -73,7 +73,9 @@ def test_valid_suggestions_are_returned_with_metadata(client: TestClient) -> Non
         "model": "fake-model",
     }
     assert body["suggestion"]["ontology"]["entity_types"][0]["name"] == "Customer"
-    assert body["suggestion"]["mapping"]["entities"][0]["mode"] == "create_or_match"
+    mapping = body["suggestion"]["mappings"][0]
+    assert mapping["dataset"] == "customers.csv"
+    assert mapping["mapping"]["entities"][0]["mode"] == "create_or_match"
     assert response.headers["x-request-id"] == "job-1"
 
 
@@ -101,12 +103,14 @@ def test_schema_violations_in_model_output_are_rejected() -> None:
         broken(lambda s: s.update(chain_of_thought="first I thought...")),
         broken(lambda s: s["ontology"]["entity_types"][0].update(name="Customer Record")),
         broken(lambda s: s["ontology"]["entity_types"][0]["properties"][0].update(type="decimal")),
-        broken(lambda s: s["mapping"]["entities"][0].update(mode="fuzzy")),
-        broken(lambda s: s["mapping"]["entities"][0].update(identity=[])),
+        broken(lambda s: s["mappings"][0]["mapping"]["entities"][0].update(mode="fuzzy")),
+        broken(lambda s: s["mappings"][0]["mapping"]["entities"][0].update(identity=[])),
+        broken(lambda s: s["mappings"][0].update(data_source_id="x")),
+        broken(lambda s: s.update(mappings=[])),
         broken(lambda s: s.update(warnings=["w"] * 21)),
         broken(lambda s: s.update(warnings=["x" * 301])),
         broken(lambda s: s["ontology"].update(entity_types=s["ontology"]["entity_types"] * 26)),
-        broken(lambda s: s.pop("mapping")),
+        broken(lambda s: s.pop("mappings")),
     ]
     for case in cases:
         client, _ = app_with(case)
@@ -133,7 +137,7 @@ def test_provider_errors_map_to_stable_codes() -> None:
 
 def test_invalid_requests_are_rejected_without_echoing_input(client: TestClient) -> None:
     body = suggest_request()
-    body["dataset_profile"]["fields"][0]["inferred_type"] = "secret-sample-value"
+    body["datasets"][0]["profile"]["fields"][0]["inferred_type"] = "secret-sample-value"
     response = client.post(SUGGEST, json=body)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
@@ -175,6 +179,20 @@ def test_active_ontologies_may_exceed_suggestion_bounds() -> None:
         active_ontology={"version": 2, "entity_types": [wide], "relationship_types": []}
     )
     assert client.post(SUGGEST, json=body).status_code == 200
+
+
+def test_several_datasets_are_accepted_and_bounded() -> None:
+    client, provider = app_with(customers_suggestion())
+    datasets = [
+        {"name": f"part-{i}.csv", "profile": suggest_request()["datasets"][0]["profile"]}
+        for i in range(3)
+    ]
+    assert client.post(SUGGEST, json=suggest_request(datasets=datasets)).status_code == 200
+    assert '"name":"part-2.csv"' in provider.requests[0].user_prompt
+    for bad in ([], datasets * 4):
+        response = client.post(SUGGEST, json=suggest_request(datasets=bad))
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
 def test_unknown_internal_routes_do_not_exist(client: TestClient) -> None:

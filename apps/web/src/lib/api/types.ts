@@ -133,9 +133,18 @@ export interface TypeAnnotation {
   existing: boolean;
 }
 
+/** The mapping of one data source in a suggestion. */
+export interface DatasetMapping {
+  /** The dataset's label in the AI request (its filename, made unique). */
+  dataset: string;
+  data_source_id: string;
+  mapping: IngestionMapping;
+}
+
 export interface GraphBuilderSuggestion {
   ontology: OntologyDraft;
-  mapping: IngestionMapping;
+  /** One mapping per data source, in a safe ingestion order. */
+  mappings: DatasetMapping[];
   confidence: number;
   annotations: { entities: TypeAnnotation[]; relationships: TypeAnnotation[] };
   warnings: string[];
@@ -163,6 +172,8 @@ export interface Job {
   id: string;
   graph_id: string;
   data_source_id: string;
+  /** Every data source the job reads, in order. */
+  data_source_ids: string[];
   kind: "analyze" | "ingest" | "ai_suggest";
   status: JobStatus;
   progress: number;

@@ -1,33 +1,58 @@
 @import "tailwindcss";
 
 /*
- * Dark-first design tokens: technical, compact, investigative. The Graph
- * Explorer (M6) builds on the same tokens.
+ * Design tokens from the MindGraph Open mockup (Pen.dev): dark-first,
+ * technical, compact. Fonts come from next/font in the root layout.
  */
 :root {
-  --background: #0a0b0f;
-  --panel: #10121a;
-  --foreground: #e6e8ee;
-  --muted: #8a8f9c;
-  --border: #22252e;
-  --accent: #3b6cf6;
-  --success: #3fb27f;
-  --warning: #d9a441;
-  --danger: #e5484d;
+  --bg: #0a0c0f;
+  --panel: #0f1216;
+  --raised: #161a20;
+  --hover: #1c2129;
+  --border: #20252d;
+  --border-strong: #2c323c;
+  --text: #e6e8eb;
+  --text-2: #9aa2ad;
+  --text-3: #5e6671;
+  --accent: #3d8bff;
+  --accent-soft: #3d8bff1f;
+  --accent-deep: #0f1e36;
+  --on-accent: #ffffff;
+  --risk: #ff7a45;
+  --risk-soft: #ff7a451f;
+  --ok: #3fb97a;
+  --warn: #e8b44c;
+  --danger: #f06a6a;
+  --edge: #4a5360;
+  --t-customer: #5b9bff;
+  --t-account: #93a4bc;
+  --t-txn: #6e7887;
+  --t-merchant: #a78bfa;
+  --t-device: #e8b44c;
+  --t-ip: #4fc3b8;
 }
 
 @theme inline {
-  --color-background: var(--background);
+  --color-bg: var(--bg);
   --color-panel: var(--panel);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-danger: var(--danger);
-  --color-foreground: var(--foreground);
-  --color-muted: var(--muted);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
   --color-accent: var(--accent);
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-deep: var(--accent-deep);
+  --color-on-accent: var(--on-accent);
+  --color-risk: var(--risk);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-edge: var(--edge);
+  --font-sans: var(--font-titillium), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 html {
@@ -35,6 +60,6 @@ html {
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--bg);
+  color: var(--text);
 }

@@ -21,7 +21,7 @@ use mindgraph_domain::{DataSourceId, GraphId, IngestionJobId};
 use crate::dto::{
     CreateOntologyRequest, DataSourceResponse, GraphBuilderStatusResponse,
     IngestionAcceptedResponse, IngestionRequest, JobAcceptedResponse, JobResponse,
-    OntologyResponse,
+    OntologyResponse, SuggestionRequest,
 };
 use crate::error::ApiError;
 use crate::routes::{AppState, graph_id};
@@ -235,11 +235,41 @@ pub(crate) async fn request_suggestion(
 ) -> Result<(StatusCode, HeaderMap, Json<JobAcceptedResponse>), ApiError> {
     let (graph_id, data_source_id) = data_source_path(path)?;
     let key = idempotency_key(&headers)?;
+    suggest(&state, graph_id, &[data_source_id], &key).await
+}
+
+/// `POST /api/v1/graphs/{graph_id}/graph-builder/suggestions` with a
+/// required `Idempotency-Key` and `{"data_source_ids": [...]}`: one
+/// suggestion that models several analysed data sources together.
+pub(crate) async fn request_graph_suggestion(
+    State(state): State<AppState>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<Json<SuggestionRequest>, JsonRejection>,
+) -> Result<(StatusCode, HeaderMap, Json<JobAcceptedResponse>), ApiError> {
+    let graph_id = crate::routes::graph_id(path)?;
+    let key = idempotency_key(&headers)?;
+    let Json(request) = body?;
+    let ids = request
+        .data_source_ids
+        .iter()
+        .map(|raw| raw.parse::<DataSourceId>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ApiError::invalid_id("INVALID_DATA_SOURCE_ID", "data source id"))?;
+    suggest(&state, graph_id, &ids, &key).await
+}
+
+async fn suggest(
+    state: &AppState,
+    graph_id: GraphId,
+    data_source_ids: &[DataSourceId],
+    key: &str,
+) -> Result<(StatusCode, HeaderMap, Json<JobAcceptedResponse>), ApiError> {
     let Some(builder) = &state.graph_builder else {
         return Err(ApplicationError::AiNotConfigured.into());
     };
     let job = builder
-        .start_suggestion(graph_id, data_source_id, &key)
+        .start_suggestion(graph_id, data_source_ids, key)
         .await?;
     Ok((
         StatusCode::ACCEPTED,

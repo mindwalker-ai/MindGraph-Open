@@ -203,6 +203,14 @@ pub(crate) struct RelationshipTypeRequest {
     properties: Vec<PropertyRequest>,
 }
 
+/// `POST /api/v1/graphs/{graph_id}/graph-builder/suggestions`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SuggestionRequest {
+    /// The analysed data sources to model together, in order.
+    pub(crate) data_source_ids: Vec<String>,
+}
+
 /// `POST /api/v1/graphs/{graph_id}/ontology`: the complete next version.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -315,6 +323,7 @@ pub(crate) struct JobResponse {
     id: String,
     graph_id: String,
     data_source_id: String,
+    data_source_ids: Vec<String>,
     kind: &'static str,
     status: &'static str,
     progress: f64,
@@ -331,6 +340,11 @@ impl From<&IngestionJob> for JobResponse {
             id: job.id.to_string(),
             graph_id: job.graph_id.to_string(),
             data_source_id: job.data_source_id.to_string(),
+            data_source_ids: job
+                .data_source_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             kind: job.kind.as_str(),
             status: job.status.as_str(),
             progress: job.progress,

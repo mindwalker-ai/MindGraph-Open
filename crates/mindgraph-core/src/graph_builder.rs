@@ -1,34 +1,37 @@
 //! AI Graph Builder use cases (M5).
 //!
 //! ```text
-//! start_suggestion ─► preflight (graph, analysed data source, AI status)
+//! start_suggestion ─► preflight (graph, analysed data sources, AI status)
 //!                  ─► ai_suggest job (ontology version pinned, Idempotency-Key)
-//! worker ─► GraphBuilderAi::suggest(profile + pinned ontology)
+//! worker ─► GraphBuilderAi::suggest(profiles of every dataset + pinned ontology)
 //!        ─► Rust validation (authoritative) ─► at most N repair attempts
-//!        ─► job result: the validated suggestion
+//!        ─► job result: the validated suggestion, one mapping per dataset in a
+//!           safe ingestion order
 //! ```
 //!
 //! AI suggests, Rust validates, the user reviews, and M4 executes: the
-//! reviewed ontology and mapping are submitted through `OntologyService`
-//! and `IngestionService`. Nothing here writes ontologies, mappings or graph
-//! data.
+//! reviewed ontology and each dataset's mapping are submitted through
+//! `OntologyService` and `IngestionService`. Nothing here writes ontologies,
+//! mappings or graph data.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{SubsecRound, Utc};
 use mindgraph_domain::{DataSourceId, DataSourceStatus, GraphId, Ontology, PropertiesSchema};
-use mindgraph_ingestion::{DatasetProfile, validate_mapping};
+use mindgraph_ingestion::{DatasetProfile, EntityMode, validate_mapping};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::executor::{JobExecutor, JobHandler};
 use crate::ingestion::{metadata_failure, validate_idempotency_key};
 use crate::{
-    AiError, AiStatus, ApplicationError, GraphBuilderAi, GraphBuilderRequest,
-    GraphBuilderSuggestion, IngestionJob, IngestionService, JobError, JobKind, JobResult,
-    MetadataStore, OntologyContext, OntologyDefinition, RepairContext,
+    AiError, AiStatus, ApplicationError, DataSourceRecord, DatasetContext, DatasetMapping,
+    GraphBuilderAi, GraphBuilderRequest, GraphBuilderSuggestion, IngestionJob, IngestionService,
+    JobError, JobKind, JobResult, MAX_SUGGESTION_DATA_SOURCES, MetadataStore, OntologyContext,
+    OntologyDefinition, RepairContext,
 };
 
 /// Largest number of entity types a suggestion may contain.
@@ -58,8 +61,11 @@ const MAX_REPAIR_ERROR_CHARS: usize = 500;
 const MAX_RESULT_BYTES: usize = 384 * 1024;
 /// Sample rows of the profile sent to the AI (the profile keeps up to 20).
 const AI_SAMPLE_ROWS: usize = 10;
-/// Upper bound of the serialised profile sent to the AI.
+/// Upper bound of one serialised profile sent to the AI.
 const MAX_AI_PROFILE_BYTES: usize = 96 * 1024;
+/// Upper bound of all profiles of one request together (the AI service
+/// accepts requests of at most 512 KiB, ontology included).
+const MAX_AI_PROFILES_BYTES: usize = 320 * 1024;
 /// Validation errors kept in a failed job's message.
 const REPORTED_ERRORS: usize = 5;
 
@@ -168,37 +174,54 @@ impl GraphBuilderService {
         self.ai.status().await
     }
 
-    /// Queues an AI suggestion job for an analysed data source, pinned to
-    /// the graph's active ontology. Submitting the same `idempotency_key`
-    /// again for the graph returns the original job without another
-    /// provider call.
+    /// Queues one AI suggestion job that models the analysed data sources
+    /// `data_source_ids` together (`1..=MAX_SUGGESTION_DATA_SOURCES`,
+    /// distinct, in the client's order), pinned to the graph's active
+    /// ontology. Submitting the same `idempotency_key` again for the graph
+    /// returns the original job without another provider call.
     ///
     /// # Errors
     ///
-    /// [`ApplicationError::InvalidRequest`] for an invalid key, not-found
-    /// errors, [`ApplicationError::Conflict`] if the data source is not
-    /// analysed or the key was used for another request,
+    /// [`ApplicationError::InvalidRequest`] for an invalid key or data
+    /// source list, not-found errors, [`ApplicationError::Conflict`] if a
+    /// data source is not analysed or the key was used for another request,
     /// [`ApplicationError::AiNotConfigured`] /
     /// [`ApplicationError::AiUnavailable`], and
     /// [`ApplicationError::Unavailable`] when the job queue is full.
     pub async fn start_suggestion(
         &self,
         graph_id: GraphId,
-        data_source_id: DataSourceId,
+        data_source_ids: &[DataSourceId],
         idempotency_key: &str,
     ) -> Result<IngestionJob, ApplicationError> {
         validate_idempotency_key(idempotency_key)?;
-        let record = self.ingestion.record(graph_id, data_source_id).await?;
+        if data_source_ids.is_empty() || data_source_ids.len() > MAX_SUGGESTION_DATA_SOURCES {
+            return Err(ApplicationError::InvalidRequest(format!(
+                "an AI suggestion needs 1 to {MAX_SUGGESTION_DATA_SOURCES} data sources"
+            )));
+        }
+        if data_source_ids.iter().collect::<HashSet<_>>().len() != data_source_ids.len() {
+            return Err(ApplicationError::InvalidRequest(
+                "the data sources of an AI suggestion must be distinct".to_owned(),
+            ));
+        }
+        let mut records = Vec::with_capacity(data_source_ids.len());
+        for &id in data_source_ids {
+            records.push(self.ingestion.record(graph_id, id).await?);
+        }
         let metadata = self.ingestion.metadata();
         if let Some(existing) = metadata
             .find_job_by_idempotency_key(graph_id, idempotency_key)
             .await?
         {
-            return replay(existing, data_source_id);
+            return replay(existing, data_source_ids);
         }
-        if record.data_source.status() != DataSourceStatus::Ready || record.profile.is_none() {
+        if records.iter().any(|record| {
+            record.data_source.status() != DataSourceStatus::Ready || record.profile.is_none()
+        }) {
             return Err(ApplicationError::Conflict(
-                "the data source must be analysed successfully before an AI suggestion".to_owned(),
+                "every data source must be analysed successfully before an AI suggestion"
+                    .to_owned(),
             ));
         }
         match self.ai.status().await {
@@ -212,7 +235,7 @@ impl GraphBuilderService {
             .ok_or(ApplicationError::GraphNotFound(graph_id))?;
         let job = IngestionJob::graph_builder(
             graph_id,
-            data_source_id,
+            data_source_ids.to_vec(),
             ontology.version(),
             idempotency_key.to_owned(),
             Utc::now().trunc_subsecs(6),
@@ -227,14 +250,14 @@ impl GraphBuilderService {
                     .ok_or_else(|| {
                         ApplicationError::Conflict("the job could not be created".to_owned())
                     })?;
-                return replay(existing, data_source_id);
+                return replay(existing, data_source_ids);
             }
             Err(other) => return Err(other),
         }
         info!(
             job_id = %job.id,
             graph_id = %graph_id,
-            data_source_id = %data_source_id,
+            data_source_count = data_source_ids.len(),
             kind = "ai_suggest",
             ontology_version = %ontology.version(),
             "job queued"
@@ -246,9 +269,9 @@ impl GraphBuilderService {
 /// The original job for a repeated idempotency key, if the request matches.
 fn replay(
     existing: IngestionJob,
-    data_source_id: DataSourceId,
+    data_source_ids: &[DataSourceId],
 ) -> Result<IngestionJob, ApplicationError> {
-    if existing.kind == JobKind::AiSuggest && existing.data_source_id == data_source_id {
+    if existing.kind == JobKind::AiSuggest && existing.data_source_ids == data_source_ids {
         Ok(existing)
     } else {
         Err(ApplicationError::Conflict(
@@ -258,20 +281,58 @@ fn replay(
 }
 
 /// The profile as sent to the AI: at most [`AI_SAMPLE_ROWS`] sample rows,
-/// fewer if the serialised profile would exceed [`MAX_AI_PROFILE_BYTES`].
-fn ai_profile(profile: &DatasetProfile) -> DatasetProfile {
+/// fewer (then fewer sample values) if the serialised profile would exceed
+/// `budget` bytes.
+fn ai_profile(profile: &DatasetProfile, budget: usize) -> DatasetProfile {
     let mut profile = profile.clone();
     profile.sample_rows.truncate(AI_SAMPLE_ROWS);
     let size = |p: &DatasetProfile| serde_json::to_vec(p).map_or(usize::MAX, |bytes| bytes.len());
-    while size(&profile) > MAX_AI_PROFILE_BYTES && !profile.sample_rows.is_empty() {
+    while size(&profile) > budget && !profile.sample_rows.is_empty() {
         profile.sample_rows.pop();
     }
-    if size(&profile) > MAX_AI_PROFILE_BYTES {
+    for keep in [1, 0] {
+        if size(&profile) <= budget {
+            break;
+        }
         for field in &mut profile.fields {
-            field.sample_values.truncate(1);
+            field.sample_values.truncate(keep);
         }
     }
     profile
+}
+
+/// The byte budget of each of `count` profiles in one request.
+fn profile_budget(count: usize) -> usize {
+    (MAX_AI_PROFILES_BYTES / count.max(1)).min(MAX_AI_PROFILE_BYTES)
+}
+
+/// Labels for the AI: the filenames, made unique with a ` (n)` suffix.
+fn dataset_labels(records: &[DataSourceRecord]) -> Vec<String> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    records
+        .iter()
+        .map(|record| {
+            let name = record.data_source.filename();
+            let count = seen.entry(name).or_default();
+            *count += 1;
+            if *count == 1 {
+                name.to_owned()
+            } else {
+                format!("{name} ({count})")
+            }
+        })
+        .collect()
+}
+
+/// One dataset of a suggestion, for validation.
+#[derive(Debug, Clone, Copy)]
+pub struct SuggestionDataset<'a> {
+    /// The label the AI refers to.
+    pub name: &'a str,
+    /// The data source behind the label.
+    pub data_source_id: DataSourceId,
+    /// Its full profile (field names are checked against it).
+    pub profile: &'a DatasetProfile,
 }
 
 fn truncate(text: &str) -> String {
@@ -286,9 +347,10 @@ fn valid_confidence(value: f64) -> bool {
 }
 
 /// Rust's authoritative check of an AI suggestion against the pinned base
-/// ontology and the dataset profile. Returns the normalised suggestion
-/// (bounded texts, `existing` flags set by Rust) or every problem found,
-/// phrased for a repair prompt: no internal details.
+/// ontology and the datasets' profiles. Returns the normalised suggestion
+/// (bounded texts, `existing` flags set by Rust, data source ids set and
+/// mappings in a safe ingestion order) or every problem found, phrased for a
+/// repair prompt: no internal details.
 ///
 /// # Errors
 ///
@@ -296,7 +358,7 @@ fn valid_confidence(value: f64) -> bool {
 pub fn validate_suggestion(
     suggestion: &GraphBuilderSuggestion,
     base: &Ontology,
-    profile: &DatasetProfile,
+    datasets: &[SuggestionDataset<'_>],
 ) -> Result<GraphBuilderSuggestion, Vec<String>> {
     let mut errors = Vec::new();
     let ontology = &suggestion.ontology;
@@ -338,6 +400,7 @@ pub fn validate_suggestion(
     if !confidences.all(valid_confidence) {
         errors.push("every confidence must be a number between 0 and 1".to_owned());
     }
+    check_dataset_coverage(&suggestion.mappings, datasets, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -347,14 +410,31 @@ pub fn validate_suggestion(
         Err(err) => return Err(vec![format!("invalid ontology: {err}")]),
     };
     check_preserves_base(base, &candidate, &mut errors);
-    if let Err(err) = validate_mapping(&suggestion.mapping, &candidate, &profile.field_names()) {
-        errors.push(err.to_string());
+    for dataset in datasets {
+        let Some(mapping) = suggestion
+            .mappings
+            .iter()
+            .find(|mapping| mapping.dataset == dataset.name)
+        else {
+            continue;
+        };
+        if let Err(err) =
+            validate_mapping(&mapping.mapping, &candidate, &dataset.profile.field_names())
+        {
+            errors.push(format!("dataset `{}`: {err}", dataset.name));
+        }
     }
+    check_matched_types_exist(&suggestion.mappings, base, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
+    let mappings = match ingestion_order(&suggestion.mappings, datasets) {
+        Ok(mappings) => mappings,
+        Err(error) => return Err(vec![error]),
+    };
 
     let mut normalised = suggestion.clone();
+    normalised.mappings = mappings;
     normalised.warnings = suggestion
         .warnings
         .iter()
@@ -380,6 +460,134 @@ pub fn validate_suggestion(
         annotation.reason = truncate(&annotation.reason);
     }
     Ok(normalised)
+}
+
+/// Exactly one mapping per dataset, and no mapping of an unknown dataset.
+fn check_dataset_coverage(
+    mappings: &[DatasetMapping],
+    datasets: &[SuggestionDataset<'_>],
+    errors: &mut Vec<String>,
+) {
+    let mut seen = HashSet::new();
+    for mapping in mappings {
+        if !datasets
+            .iter()
+            .any(|dataset| dataset.name == mapping.dataset)
+        {
+            errors.push(format!(
+                "`{}` is not one of the datasets; use their exact names",
+                mapping.dataset
+            ));
+        } else if !seen.insert(mapping.dataset.as_str()) {
+            errors.push(format!(
+                "dataset `{}` has more than one mapping",
+                mapping.dataset
+            ));
+        }
+    }
+    for dataset in datasets {
+        if !seen.contains(dataset.name) {
+            errors.push(format!("dataset `{}` needs a mapping", dataset.name));
+        }
+    }
+}
+
+/// A `match_only` entity type must already exist in the base ontology or be
+/// created (`create_or_match`) by one of the datasets; otherwise nothing can
+/// ever match.
+fn check_matched_types_exist(
+    mappings: &[DatasetMapping],
+    base: &Ontology,
+    errors: &mut Vec<String>,
+) {
+    let created: HashSet<&str> = mappings
+        .iter()
+        .flat_map(|mapping| &mapping.mapping.entities)
+        .filter(|entity| entity.mode == EntityMode::CreateOrMatch)
+        .map(|entity| entity.entity_type.as_str())
+        .collect();
+    let mut reported = HashSet::new();
+    for entity in mappings
+        .iter()
+        .flat_map(|mapping| &mapping.mapping.entities)
+    {
+        let name = entity.entity_type.as_str();
+        if entity.mode == EntityMode::MatchOnly
+            && base.entity_type(name).is_none()
+            && !created.contains(name)
+            && reported.insert(name)
+        {
+            errors.push(format!(
+                "entity type `{name}` is only matched (match_only) but neither exists yet nor \
+                 is created by any dataset; let one dataset create it (create_or_match)"
+            ));
+        }
+    }
+}
+
+/// The mappings in an order in which every dataset that only matches an
+/// entity type comes after the datasets that create it, ties in the
+/// client's dataset order; each with its data source id set.
+fn ingestion_order(
+    mappings: &[DatasetMapping],
+    datasets: &[SuggestionDataset<'_>],
+) -> Result<Vec<DatasetMapping>, String> {
+    let ordered: Vec<(&SuggestionDataset<'_>, &DatasetMapping)> = datasets
+        .iter()
+        .filter_map(|dataset| {
+            mappings
+                .iter()
+                .find(|mapping| mapping.dataset == dataset.name)
+                .map(|mapping| (dataset, mapping))
+        })
+        .collect();
+    let types_with = |mapping: &DatasetMapping, mode: EntityMode| -> HashSet<String> {
+        mapping
+            .mapping
+            .entities
+            .iter()
+            .filter(|entity| entity.mode == mode)
+            .map(|entity| entity.entity_type.clone())
+            .collect()
+    };
+    let creates: Vec<HashSet<String>> = ordered
+        .iter()
+        .map(|(_, mapping)| types_with(mapping, EntityMode::CreateOrMatch))
+        .collect();
+    let matches: Vec<HashSet<String>> = ordered
+        .iter()
+        .map(|(_, mapping)| types_with(mapping, EntityMode::MatchOnly))
+        .collect();
+    // `i` must run before `j` when `i` creates a type `j` only matches.
+    let depends = |j: usize, i: usize| i != j && !creates[i].is_disjoint(&matches[j]);
+    let mut done = vec![false; ordered.len()];
+    let mut result = Vec::with_capacity(ordered.len());
+    while result.len() < ordered.len() {
+        let next = (0..ordered.len())
+            .find(|&j| !done[j] && (0..ordered.len()).all(|i| done[i] || !depends(j, i)));
+        let Some(j) = next else {
+            let stuck: Vec<&str> = (0..ordered.len())
+                .filter(|&j| !done[j])
+                .map(|j| ordered[j].0.name)
+                .collect();
+            return Err(format!(
+                "datasets {} only match entity types that each other creates; let one of                  them create the type (mode create_or_match)",
+                stuck
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        done[j] = true;
+        let (dataset, mapping) = ordered[j];
+        result.push(DatasetMapping {
+            dataset: dataset.name.to_owned(),
+            data_source_id: Some(dataset.data_source_id),
+            mapping: mapping.mapping.clone(),
+        });
+    }
+    Ok(result)
 }
 
 fn check_properties(
@@ -518,15 +726,34 @@ impl SuggestionWorker {
 #[async_trait]
 impl JobHandler for SuggestionWorker {
     async fn run(&self, job: &IngestionJob) -> Result<Option<JobResult>, JobError> {
-        let profile = self
-            .metadata
-            .get_data_source(job.graph_id, job.data_source_id)
-            .await
-            .map_err(|err| metadata_failure(&err))?
-            .and_then(|record| record.profile)
-            .ok_or_else(|| {
-                JobError::new("DATA_SOURCE_NOT_READY", "the data source has no profile")
-            })?;
+        let mut records = Vec::with_capacity(job.data_source_ids.len());
+        for &id in &job.data_source_ids {
+            let record = self
+                .metadata
+                .get_data_source(job.graph_id, id)
+                .await
+                .map_err(|err| metadata_failure(&err))?
+                .filter(|record| record.profile.is_some())
+                .ok_or_else(|| {
+                    JobError::new("DATA_SOURCE_NOT_READY", "a data source has no profile")
+                })?;
+            records.push(record);
+        }
+        let labels = dataset_labels(&records);
+        let profiles: Vec<&DatasetProfile> = records
+            .iter()
+            .filter_map(|record| record.profile.as_ref())
+            .collect();
+        let datasets: Vec<SuggestionDataset<'_>> = labels
+            .iter()
+            .zip(&records)
+            .zip(&profiles)
+            .map(|((name, record), profile)| SuggestionDataset {
+                name,
+                data_source_id: record.data_source.id(),
+                profile,
+            })
+            .collect();
         let version = job
             .ontology_version
             .ok_or_else(|| JobError::new("INTERNAL_ERROR", "the job has no pinned ontology"))?;
@@ -545,9 +772,16 @@ impl JobHandler for SuggestionWorker {
         self.progress(job, 0.1).await;
 
         let started = Instant::now();
+        let budget = profile_budget(datasets.len());
         let mut request = GraphBuilderRequest {
             correlation_id: job.id.to_string(),
-            dataset_profile: ai_profile(&profile),
+            datasets: datasets
+                .iter()
+                .map(|dataset| DatasetContext {
+                    name: dataset.name.to_owned(),
+                    profile: ai_profile(dataset.profile, budget),
+                })
+                .collect(),
             active_ontology: OntologyContext {
                 version: version.get(),
                 definition: OntologyDefinition::from_ontology(&base),
@@ -561,17 +795,17 @@ impl JobHandler for SuggestionWorker {
                 .suggest(&request)
                 .await
                 .map_err(|err| ai_failure(&err))?;
-            match validate_suggestion(&response.suggestion, &base, &profile) {
+            match validate_suggestion(&response.suggestion, &base, &datasets) {
                 Ok(suggestion) => {
                     info!(
                         job_id = %job.id,
                         graph_id = %job.graph_id,
-                        data_source_id = %job.data_source_id,
+                        dataset_count = datasets.len(),
                         provider = %response.metadata.provider,
                         model = %response.metadata.model,
                         prompt_version = %response.metadata.prompt_version,
-                        field_count = profile.fields.len(),
-                        record_count = profile.record_count,
+                        field_count = profiles.iter().map(|p| p.fields.len()).sum::<usize>(),
+                        record_count = profiles.iter().map(|p| p.record_count).sum::<u64>(),
                         repair_attempts,
                         duration_ms =
                             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -641,10 +875,15 @@ mod tests {
             );
             profile.sample_rows.push(row);
         }
-        let sent = ai_profile(&profile);
+        let sent = ai_profile(&profile, MAX_AI_PROFILE_BYTES);
         assert!(sent.sample_rows.len() <= AI_SAMPLE_ROWS);
         assert!(serde_json::to_vec(&sent).unwrap().len() <= MAX_AI_PROFILE_BYTES);
         assert_eq!(sent.record_count, 30);
+        let small = ai_profile(&profile, profile_budget(MAX_SUGGESTION_DATA_SOURCES));
+        assert!(
+            serde_json::to_vec(&small).unwrap().len()
+                <= MAX_AI_PROFILES_BYTES / MAX_SUGGESTION_DATA_SOURCES
+        );
     }
 
     #[test]
@@ -660,6 +899,89 @@ mod tests {
         assert_eq!(sent.len(), MAX_REPAIR_ERRORS);
         assert_eq!(sent[48], "error 48");
         assert_eq!(sent[49], "and 71 more problems of the same kinds");
+    }
+
+    fn mapping(dataset: &str, entities: &[(&str, EntityMode)]) -> DatasetMapping {
+        let entities = entities
+            .iter()
+            .map(|(entity_type, mode)| {
+                serde_json::json!({
+                    "alias": entity_type.to_lowercase(),
+                    "entity_type": entity_type,
+                    "mode": mode,
+                    "identity": [{"source_field": "id", "property": "id"}],
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "dataset": dataset,
+            "mapping": {"entities": entities, "relationships": []},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn ingestion_order_puts_creators_first_and_reports_cycles() {
+        use EntityMode::{CreateOrMatch, MatchOnly};
+        let profile = DatasetProfile {
+            record_count: 0,
+            fields: vec![],
+            sample_rows: vec![],
+        };
+        let ids = [
+            DataSourceId::new(),
+            DataSourceId::new(),
+            DataSourceId::new(),
+        ];
+        let names = ["devices.csv", "customers.csv", "notes.csv"];
+        let datasets: Vec<SuggestionDataset<'_>> = names
+            .iter()
+            .zip(ids)
+            .map(|(name, id)| SuggestionDataset {
+                name,
+                data_source_id: id,
+                profile: &profile,
+            })
+            .collect();
+        let mappings = vec![
+            mapping("notes.csv", &[("Note", CreateOrMatch)]),
+            mapping(
+                "devices.csv",
+                &[("Device", CreateOrMatch), ("Customer", MatchOnly)],
+            ),
+            mapping("customers.csv", &[("Customer", CreateOrMatch)]),
+        ];
+        let ordered = ingestion_order(&mappings, &datasets).unwrap();
+        let order: Vec<(&str, Option<DataSourceId>)> = ordered
+            .iter()
+            .map(|m| (m.dataset.as_str(), m.data_source_id))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("customers.csv", Some(ids[1])),
+                ("devices.csv", Some(ids[0])),
+                ("notes.csv", Some(ids[2])),
+            ],
+            "dependencies first, otherwise the client's order"
+        );
+
+        let cycle = vec![
+            mapping(
+                "devices.csv",
+                &[("Device", CreateOrMatch), ("Customer", MatchOnly)],
+            ),
+            mapping(
+                "customers.csv",
+                &[("Customer", CreateOrMatch), ("Device", MatchOnly)],
+            ),
+            mapping("notes.csv", &[("Note", CreateOrMatch)]),
+        ];
+        let error = ingestion_order(&cycle, &datasets).unwrap_err();
+        assert!(
+            error.contains("`devices.csv`, `customers.csv`") && !error.contains("notes.csv"),
+            "{error}"
+        );
     }
 
     #[test]

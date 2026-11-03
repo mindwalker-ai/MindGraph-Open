@@ -1,71 +1,100 @@
 /**
- * Small building blocks in the MindGraph look: dark, compact, bordered
- * panels and monospace labels. No component library.
+ * Building blocks in the MindGraph mockup's look: dark, compact panels,
+ * Titillium Web labels and IBM Plex Mono data. No component library.
  */
 
+import Image from "next/image";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
-import { type ConfidenceLevel, confidenceLevel } from "@/lib/builder/draft";
 import { cn } from "@/lib/utils";
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+type ButtonSize = "sm" | "md" | "lg";
 
 const BUTTON: Record<ButtonVariant, string> = {
-  primary: "bg-accent text-white hover:bg-accent/90 disabled:bg-accent/40",
-  secondary: "border border-border bg-panel hover:border-muted disabled:opacity-50",
-  ghost: "text-muted hover:text-foreground disabled:opacity-40",
-  danger: "text-danger hover:bg-danger/10 disabled:opacity-40",
+  primary: "bg-accent text-on-accent hover:bg-accent/90 disabled:bg-accent/40",
+  secondary:
+    "border border-border-strong bg-raised text-text hover:bg-hover disabled:text-text-3 disabled:hover:bg-raised",
+  ghost: "text-text-2 hover:text-text disabled:text-text-3",
+  danger: "text-danger hover:text-danger/80 disabled:text-text-3",
+};
+
+const SIZE: Record<ButtonSize, string> = {
+  sm: "h-[26px] gap-[5px] px-2 text-[12px]",
+  md: "h-8 gap-2 px-3 text-[13px]",
+  lg: "h-9 gap-2 px-[18px] text-[14px]",
 };
 
 export function Button({
   variant = "secondary",
+  size = "md",
+  icon,
   className,
+  children,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: ReactNode;
+}) {
   return (
     <button
       type="button"
       className={cn(
-        "inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed",
+        "inline-flex shrink-0 items-center justify-center rounded-[4px] font-semibold whitespace-nowrap transition-colors disabled:cursor-not-allowed",
+        variant !== "ghost" && variant !== "danger" && SIZE[size],
+        (variant === "ghost" || variant === "danger") && "gap-1.5 text-[12.5px]",
         BUTTON[variant],
         className,
       )}
       {...props}
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+/** A feature shown as in the design but not built yet. */
+export function comingIn(milestone?: string): string {
+  return milestone ? `Coming in ${milestone}` : "Coming soon";
+}
+
+/** The MindGraph mark from the design. */
+export function Mark({ size = 22 }: { size?: number }) {
+  return (
+    <Image
+      src="/mark.png"
+      alt=""
+      width={size}
+      height={Math.round((size * 156) / 178)}
+      priority
+      className="shrink-0"
     />
   );
 }
 
-export function Panel({
-  title,
-  actions,
-  children,
-  className,
-}: {
-  title?: ReactNode;
-  actions?: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
+/** Small uppercase monospace label, e.g. "DEFINITION". */
+export function Kicker({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <section className={cn("rounded-md border border-border bg-panel", className)}>
-      {(title || actions) && (
-        <header className="flex items-center justify-between gap-2 border-b border-border px-4 py-2">
-          <h2 className="font-mono text-xs uppercase tracking-wider text-muted">{title}</h2>
-          <div className="flex items-center gap-1">{actions}</div>
-        </header>
+    <span
+      className={cn(
+        "font-mono text-[10px] font-medium tracking-[0.6px] text-text-3 uppercase",
+        className,
       )}
-      <div className="p-4">{children}</div>
-    </section>
+    >
+      {children}
+    </span>
   );
 }
 
-type BadgeTone = "neutral" | "accent" | "success" | "warning" | "danger";
+type BadgeTone = "neutral" | "accent" | "ok" | "warn" | "danger";
 
 const BADGE: Record<BadgeTone, string> = {
-  neutral: "border-border text-muted",
-  accent: "border-accent/50 text-accent",
-  success: "border-success/50 text-success",
-  warning: "border-warning/50 text-warning",
+  neutral: "border-border-strong text-text-3",
+  accent: "border-accent/60 text-accent",
+  ok: "border-ok/50 text-ok",
+  warn: "border-warn/50 text-warn",
   danger: "border-danger/50 text-danger",
 };
 
@@ -73,7 +102,7 @@ export function Badge({ tone = "neutral", children }: { tone?: BadgeTone; childr
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide",
+        "inline-flex items-center rounded-[3px] border px-[5px] py-px font-mono text-[9px] font-medium tracking-[0.6px] uppercase",
         BADGE[tone],
       )}
     >
@@ -82,24 +111,8 @@ export function Badge({ tone = "neutral", children }: { tone?: BadgeTone; childr
   );
 }
 
-const LEVEL_TONE: Record<ConfidenceLevel, BadgeTone> = {
-  high: "success",
-  medium: "neutral",
-  low: "warning",
-};
-
-/** Model confidence, shown as a band and a percentage. Never a guarantee. */
-export function ConfidenceBadge({ value }: { value: number | null }) {
-  if (value === null) return null;
-  const level = confidenceLevel(value);
-  return (
-    <span title={`Model confidence (${level}); not a guarantee`}>
-      <Badge tone={LEVEL_TONE[level]}>{Math.round(value * 100)}%</Badge>
-    </span>
-  );
-}
-
-export function ProgressBar({ value, label }: { value: number; label: string }) {
+/** A thin meter, as the confidence bar of the design. */
+export function Meter({ value, label }: { value: number; label: string }) {
   const percent = Math.round(Math.min(Math.max(value, 0), 1) * 100);
   return (
     <div
@@ -108,9 +121,12 @@ export function ProgressBar({ value, label }: { value: number; label: string }) 
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={percent}
-      className="h-1.5 w-full overflow-hidden rounded bg-border"
+      className="h-1 w-full overflow-hidden rounded-[2px] bg-hover"
     >
-      <div className="h-full bg-accent transition-[width]" style={{ width: `${percent}%` }} />
+      <div
+        className="h-full rounded-[2px] bg-accent transition-[width]"
+        style={{ width: `${percent}%` }}
+      />
     </div>
   );
 }
@@ -119,12 +135,31 @@ export function ErrorNote({ children }: { children: ReactNode }) {
   return (
     <p
       role="alert"
-      className="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger"
+      className="rounded-[4px] border border-danger/40 bg-danger/10 px-3 py-2 text-[12.5px] text-danger"
     >
       {children}
     </p>
   );
 }
 
+/** Text inputs and selects of the design (dark well, monospace value). */
 export const inputClass =
-  "w-full rounded border border-border bg-background px-2 py-1 text-sm text-foreground outline-none focus:border-accent disabled:text-muted";
+  "h-8 w-full rounded-[4px] border border-border-strong bg-bg px-[10px] font-mono text-[11.5px] text-text outline-none focus:border-accent disabled:text-text-3";
+
+/** A labelled form field. */
+export function Field({
+  label,
+  children,
+  className,
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={cn("flex w-full flex-col gap-1", className)}>
+      <span className="text-[12px] text-text-3">{label}</span>
+      {children}
+    </label>
+  );
+}

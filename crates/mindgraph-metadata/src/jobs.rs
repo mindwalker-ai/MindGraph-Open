@@ -36,7 +36,9 @@ macro_rules! job_columns {
     () => {
         "id, graph_id, data_source_id, kind, status, progress, ontology_version, \
          idempotency_key, mapping_json, error_code, error_message, result_json, \
-         created_at, updated_at"
+         created_at, updated_at, \
+         ARRAY(SELECT s.data_source_id FROM ingestion_job_data_sources s \
+               WHERE s.job_id = ingestion_jobs.id ORDER BY s.position) AS data_source_ids"
     };
 }
 
@@ -127,6 +129,7 @@ fn decode_job(row: &PgRow) -> Result<IngestionJob, MetadataStoreError> {
     let id: Uuid = row.try_get("id").map_err(read)?;
     let graph_id: Uuid = row.try_get("graph_id").map_err(read)?;
     let data_source_id: Uuid = row.try_get("data_source_id").map_err(read)?;
+    let listed_sources: Vec<Uuid> = row.try_get("data_source_ids").map_err(read)?;
     let kind: String = row.try_get("kind").map_err(read)?;
     let status: String = row.try_get("status").map_err(read)?;
     let progress: f64 = row.try_get("progress").map_err(read)?;
@@ -151,11 +154,37 @@ fn decode_job(row: &PgRow) -> Result<IngestionJob, MetadataStoreError> {
     let kind = kind
         .parse::<JobKind>()
         .map_err(|err| corrupt("job kind", err))?;
+    let data_source_id =
+        DataSourceId::from_uuid(data_source_id).map_err(|err| corrupt("data source id", err))?;
+    // Jobs of one data source have no listed sources (including AI jobs
+    // created before multi-dataset suggestions).
+    let data_source_ids = if listed_sources.is_empty() {
+        vec![data_source_id]
+    } else {
+        listed_sources
+            .into_iter()
+            .map(|id| DataSourceId::from_uuid(id).map_err(|err| corrupt("data source id", err)))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if data_source_ids.first() != Some(&data_source_id) {
+        return Err(corrupt(
+            "job data sources",
+            "the first listed data source must be the job's data source",
+        ));
+    }
+    let mut result = result.map(|value| decode_result(kind, value)).transpose()?;
+    // Suggestions stored before multi-dataset support have one mapping
+    // without a data source: it is the job's data source.
+    if let Some(JobResult::GraphBuilder(stored)) = &mut result {
+        for mapping in &mut stored.suggestion.mappings {
+            mapping.data_source_id.get_or_insert(data_source_id);
+        }
+    }
     Ok(IngestionJob {
         id: IngestionJobId::from_uuid(id).map_err(|err| corrupt("job id", err))?,
         graph_id: GraphId::from_uuid(graph_id).map_err(|err| corrupt("graph id", err))?,
-        data_source_id: DataSourceId::from_uuid(data_source_id)
-            .map_err(|err| corrupt("data source id", err))?,
+        data_source_id,
+        data_source_ids,
         kind,
         status: status
             .parse::<JobStatus>()
@@ -167,7 +196,7 @@ fn decode_job(row: &PgRow) -> Result<IngestionJob, MetadataStoreError> {
             .map(|value| from_json::<IngestionMapping>("ingestion mapping", value))
             .transpose()?,
         error,
-        result: result.map(|value| decode_result(kind, value)).transpose()?,
+        result,
         created_at,
         updated_at,
     })
@@ -301,7 +330,42 @@ impl PostgresMetadataStore {
             .as_ref()
             .map(|mapping| to_json("ingestion mapping", mapping))
             .transpose()?;
-        let result = sqlx::query(
+        let result = self.insert_job_rows(job, version, mapping).await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let pinned = constraint(&err) == Some("ingestion_jobs_pinned_ontology_fk");
+                Err(match map_error("creating a job", err) {
+                    MetadataStoreError::NotFound(_) if pinned => {
+                        MetadataStoreError::InvalidInput(format!(
+                            "the pinned ontology version of job {} does not exist",
+                            job.id
+                        ))
+                    }
+                    MetadataStoreError::NotFound(_) => MetadataStoreError::NotFound(format!(
+                        "a data source of job {} in graph {}",
+                        job.id, job.graph_id
+                    )),
+                    MetadataStoreError::Conflict(_) => MetadataStoreError::Conflict(format!(
+                        "job {} or its idempotency key already exists",
+                        job.id
+                    )),
+                    other => other,
+                })
+            }
+        }
+    }
+
+    /// The job row and, for AI suggestions, its listed data sources, in one
+    /// transaction.
+    async fn insert_job_rows(
+        &self,
+        job: &IngestionJob,
+        version: Option<i32>,
+        mapping: Option<Value>,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool().begin().await?;
+        sqlx::query(
             "INSERT INTO ingestion_jobs \
              (id, graph_id, data_source_id, kind, status, progress, ontology_version, \
               idempotency_key, mapping_json, created_at, updated_at) \
@@ -318,31 +382,22 @@ impl PostgresMetadataStore {
         .bind(mapping)
         .bind(job.created_at)
         .bind(job.updated_at)
-        .execute(self.pool())
-        .await;
-        match result {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                let pinned = constraint(&err) == Some("ingestion_jobs_pinned_ontology_fk");
-                Err(match map_error("creating a job", err) {
-                    MetadataStoreError::NotFound(_) if pinned => {
-                        MetadataStoreError::InvalidInput(format!(
-                            "the pinned ontology version of job {} does not exist",
-                            job.id
-                        ))
-                    }
-                    MetadataStoreError::NotFound(_) => MetadataStoreError::NotFound(format!(
-                        "data source {} of graph {}",
-                        job.data_source_id, job.graph_id
-                    )),
-                    MetadataStoreError::Conflict(_) => MetadataStoreError::Conflict(format!(
-                        "job {} or its idempotency key already exists",
-                        job.id
-                    )),
-                    other => other,
-                })
-            }
+        .execute(&mut *tx)
+        .await?;
+        if job.kind == JobKind::AiSuggest {
+            let sources: Vec<Uuid> = job.data_source_ids.iter().map(|id| id.as_uuid()).collect();
+            sqlx::query(
+                "INSERT INTO ingestion_job_data_sources (job_id, graph_id, position, data_source_id) \
+                 SELECT $1, $2, (t.ord - 1)::smallint, t.id \
+                 FROM UNNEST($3::uuid[]) WITH ORDINALITY AS t(id, ord)",
+            )
+            .bind(job.id.as_uuid())
+            .bind(job.graph_id.as_uuid())
+            .bind(&sources)
+            .execute(&mut *tx)
+            .await?;
         }
+        tx.commit().await
     }
 
     pub(crate) async fn select_job(

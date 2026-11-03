@@ -13,14 +13,15 @@ describe("createApiClient", () => {
   it("calls same-origin /api/v1 paths with the idempotency key", async () => {
     const fetcher = vi.fn().mockResolvedValue(reply(202, { job_id: "j1", status: "queued" }));
     const api = createApiClient("", fetcher);
-    await expect(api.requestSuggestion("g1", "d1", "key-1")).resolves.toEqual({
+    await expect(api.requestSuggestion("g1", ["d1", "d2"], "key-1")).resolves.toEqual({
       job_id: "j1",
       status: "queued",
     });
     const [url, init] = fetcher.mock.calls[0];
-    expect(url).toBe("/api/v1/graphs/g1/data-sources/d1/graph-builder/suggestions");
+    expect(url).toBe("/api/v1/graphs/g1/graph-builder/suggestions");
     expect(init.method).toBe("POST");
     expect(init.headers["Idempotency-Key"]).toBe("key-1");
+    expect(JSON.parse(init.body)).toEqual({ data_source_ids: ["d1", "d2"] });
   });
 
   it("sends ingestion mappings as JSON", async () => {
@@ -40,7 +41,7 @@ describe("createApiClient", () => {
       }),
     );
     const error = await createApiClient("", fetcher)
-      .requestSuggestion("g", "d", "k")
+      .requestSuggestion("g", ["d"], "k")
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 503, code: "AI_NOT_CONFIGURED", requestId: "r1" });

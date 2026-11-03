@@ -96,6 +96,10 @@ pub fn router(state: AppState) -> Router {
             "/graphs/{graph_id}/data-sources/{data_source_id}/graph-builder/suggestions",
             post(datasets::request_suggestion),
         )
+        .route(
+            "/graphs/{graph_id}/graph-builder/suggestions",
+            post(datasets::request_graph_suggestion),
+        )
         .route("/graph-builder/status", get(datasets::graph_builder_status))
         .route("/jobs/{job_id}", get(datasets::get_job))
         .route("/jobs/{job_id}/events", get(datasets::job_events));
