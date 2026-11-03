@@ -326,8 +326,11 @@ curl -s $API/jobs/$JOB | jq '.result.suggestion | {entities: [.ontology.entity_t
 # (the body is a complete ontology, so a stale one would drop newer types):
 curl -s $API/jobs/$JOB | jq '.result | .suggestion.ontology + {expected_version: .ontology_version_base}' > ontology.json
 curl -s $API/jobs/$JOB | jq '{mapping: .result.suggestion.mapping}' > mapping.json
-curl -s -X POST $API/graphs/$GRAPH/ontology -H "Content-Type: application/json" -d @ontology.json
-curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+# --fail-with-body stops here on 409 (or any error), so the mapping is never
+# ingested against an ontology this example did not save:
+curl -s --fail-with-body -X POST $API/graphs/$GRAPH/ontology \
+  -H "Content-Type: application/json" -d @ontology.json \
+&& curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
   -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" -d @mapping.json
 ```
 

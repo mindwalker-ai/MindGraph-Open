@@ -363,6 +363,17 @@ describe("GraphBuilder", () => {
     const saving = await screen.findByRole("button", { name: "Saving ontology…" });
     expect((saving as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole("list", { name: "Entities" })).toBeDefined();
+    // The review is locked: an edit now would be lost when the save completes.
+    const review = screen.getByRole("group", { name: "Draft review" }) as HTMLFieldSetElement;
+    expect(review.disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "+ Add entity" }) as HTMLButtonElement).matches(
+        ":disabled",
+      ),
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Discard draft" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     save({ ...ONTOLOGY, version: 3 });
     expect(await screen.findByText("Graph generated")).toBeDefined();
   });

@@ -425,11 +425,21 @@ export function GraphBuilder({ graphId, api: injected, pollMs = 750 }: GraphBuil
                 "Manual draft — map fields to entity types, then generate."
               )}
             </p>
-            <Button variant="ghost" onClick={() => setDraft(null)}>
+            <Button
+              variant="ghost"
+              disabled={generation.stage === "saving"}
+              onClick={() => setDraft(null)}
+            >
               Discard draft
             </Button>
           </div>
-          <ReviewPanel draft={draft} fields={fields} onChange={setDraft} />
+          {/* Edits made while saving would be lost: the save uses the draft as it was. */}
+          <ReviewPanel
+            draft={draft}
+            fields={fields}
+            onChange={setDraft}
+            disabled={generation.stage === "saving"}
+          />
           <Panel title="5 · Generate">
             <div className="flex flex-col gap-3">
               {errors.length > 0 && (
