@@ -134,12 +134,35 @@ class DatasetProfile(Strict):
     sample_rows: list[dict[str, Any]] = Field(max_length=20)
 
 
+# The active ontology is whatever the graph already has: MindGraph Core does
+# not bound properties per type, so these models do not reuse the suggestion
+# limits. The 512 KiB request cap bounds the whole payload.
+MAX_ACTIVE_TYPES = 1000
+MAX_ACTIVE_PROPERTIES = 10_000
+
+
+class ActiveEntityType(Strict):
+    name: MachineName
+    display_name: Annotated[str, StringConstraints(max_length=120)] | None = None
+    description: Annotated[str, StringConstraints(max_length=2000)] | None = None
+    properties: list[PropertyDraft] = Field(default_factory=list, max_length=MAX_ACTIVE_PROPERTIES)
+
+
+class ActiveRelationshipType(Strict):
+    name: MachineName
+    source_entity_type: MachineName
+    target_entity_type: MachineName
+    properties: list[PropertyDraft] = Field(default_factory=list, max_length=MAX_ACTIVE_PROPERTIES)
+
+
 class ActiveOntology(Strict):
     """The pinned active ontology (existing graphs may exceed suggestion bounds)."""
 
     version: int = Field(ge=1)
-    entity_types: list[EntityTypeDraft] = Field(default_factory=list, max_length=1000)
-    relationship_types: list[RelationshipTypeDraft] = Field(default_factory=list, max_length=1000)
+    entity_types: list[ActiveEntityType] = Field(default_factory=list, max_length=MAX_ACTIVE_TYPES)
+    relationship_types: list[ActiveRelationshipType] = Field(
+        default_factory=list, max_length=MAX_ACTIVE_TYPES
+    )
 
 
 class RepairContext(Strict):

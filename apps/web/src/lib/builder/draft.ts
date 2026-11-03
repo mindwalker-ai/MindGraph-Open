@@ -55,8 +55,10 @@ export interface DraftEntity {
 export interface DraftRelationship {
   key: string;
   typeName: string;
-  sourceAlias: string;
-  targetAlias: string;
+  /** The `key` of the source entity: stable while its alias is edited. */
+  sourceKey: string;
+  /** The `key` of the target entity. */
+  targetKey: string;
   existing: boolean;
   confidence: number | null;
   reason: string;
@@ -170,34 +172,37 @@ export function fromSuggestion(
   const relationshipTypeOf = (name: string) =>
     suggestion.ontology.relationship_types.find((t) => t.name === name) ??
     baseRelationshipType(base, name);
+  const entities: DraftEntity[] = suggestion.mapping.entities.map((mapping) => {
+    const type = typeOf(mapping.entity_type);
+    const note = annotation(suggestion.annotations.entities, mapping.entity_type);
+    return {
+      key: nextKey("e"),
+      alias: mapping.alias,
+      typeName: mapping.entity_type,
+      displayName: type?.display_name ?? mapping.entity_type,
+      mode: mapping.mode,
+      existing: false,
+      confidence: note?.confidence ?? null,
+      reason: note?.reason ?? "",
+      properties: draftProperties(type?.properties ?? [], mapping.properties, mapping.identity),
+    };
+  });
+  // Unknown aliases become "" and are reported by validateDraft.
+  const keyOfAlias = (alias: string) => entities.find((e) => e.alias === alias)?.key ?? "";
   return normalise({
     base,
     origin: "ai",
     confidence: suggestion.confidence,
     warnings: suggestion.warnings,
-    entities: suggestion.mapping.entities.map((mapping) => {
-      const type = typeOf(mapping.entity_type);
-      const note = annotation(suggestion.annotations.entities, mapping.entity_type);
-      return {
-        key: nextKey("e"),
-        alias: mapping.alias,
-        typeName: mapping.entity_type,
-        displayName: type?.display_name ?? mapping.entity_type,
-        mode: mapping.mode,
-        existing: false,
-        confidence: note?.confidence ?? null,
-        reason: note?.reason ?? "",
-        properties: draftProperties(type?.properties ?? [], mapping.properties, mapping.identity),
-      };
-    }),
+    entities,
     relationships: suggestion.mapping.relationships.map((mapping) => {
       const type = relationshipTypeOf(mapping.relationship_type);
       const note = annotation(suggestion.annotations.relationships, mapping.relationship_type);
       return {
         key: nextKey("r"),
         typeName: mapping.relationship_type,
-        sourceAlias: mapping.source,
-        targetAlias: mapping.target,
+        sourceKey: keyOfAlias(mapping.source),
+        targetKey: keyOfAlias(mapping.target),
         existing: false,
         confidence: note?.confidence ?? null,
         reason: note?.reason ?? "",
@@ -275,31 +280,22 @@ export function updateEntity(
   key: string,
   patch: Partial<Pick<DraftEntity, "alias" | "typeName" | "displayName" | "mode">>,
 ): BuilderDraft {
-  const before = draft.entities.find((e) => e.key === key);
-  if (!before) return draft;
-  const alias = patch.alias ?? before.alias;
+  if (!draft.entities.some((e) => e.key === key)) return draft;
+  // Relationships point at entity keys, so a renamed alias keeps exactly
+  // its own relationships, even while it briefly equals another alias.
   return normalise({
     ...draft,
     entities: draft.entities.map((e) => (e.key === key ? { ...e, ...patch } : e)),
-    // A renamed alias keeps its relationships.
-    relationships: draft.relationships.map((r) => ({
-      ...r,
-      sourceAlias: r.sourceAlias === before.alias ? alias : r.sourceAlias,
-      targetAlias: r.targetAlias === before.alias ? alias : r.targetAlias,
-    })),
   });
 }
 
-/** Removes an entity and every relationship that uses its alias. */
+/** Removes an entity and every relationship that uses it. */
 export function removeEntity(draft: BuilderDraft, key: string): BuilderDraft {
-  const removed = draft.entities.find((e) => e.key === key);
-  if (!removed) return draft;
+  if (!draft.entities.some((e) => e.key === key)) return draft;
   return {
     ...draft,
     entities: draft.entities.filter((e) => e.key !== key),
-    relationships: draft.relationships.filter(
-      (r) => r.sourceAlias !== removed.alias && r.targetAlias !== removed.alias,
-    ),
+    relationships: draft.relationships.filter((r) => r.sourceKey !== key && r.targetKey !== key),
   };
 }
 
@@ -409,8 +405,8 @@ export function addRelationship(draft: BuilderDraft): BuilderDraft {
       {
         key: nextKey("r"),
         typeName: "RELATED_TO",
-        sourceAlias: source?.alias ?? "",
-        targetAlias: target?.alias ?? "",
+        sourceKey: source?.key ?? "",
+        targetKey: target?.key ?? "",
         existing: false,
         confidence: null,
         reason: "",
@@ -423,7 +419,7 @@ export function addRelationship(draft: BuilderDraft): BuilderDraft {
 export function updateRelationship(
   draft: BuilderDraft,
   key: string,
-  patch: Partial<Pick<DraftRelationship, "typeName" | "sourceAlias" | "targetAlias">>,
+  patch: Partial<Pick<DraftRelationship, "typeName" | "sourceKey" | "targetKey">>,
 ): BuilderDraft {
   return normalise({
     ...draft,
@@ -443,7 +439,7 @@ export function validateDraft(draft: BuilderDraft, fields: string[]): string[] {
   const known = new Set(fields);
   if (draft.entities.length === 0) errors.push("Add at least one entity.");
   const aliases = new Set<string>();
-  const typeOfAlias = new Map<string, string>();
+  const typeOfKey = new Map(draft.entities.map((e) => [e.key, e.typeName]));
   for (const entity of draft.entities) {
     const label = entity.typeName || "an entity";
     if (!MACHINE_NAME.test(entity.typeName)) {
@@ -454,7 +450,6 @@ export function validateDraft(draft: BuilderDraft, fields: string[]): string[] {
     if (!entity.alias.trim()) errors.push(`Entity ${label} needs an alias.`);
     else if (aliases.has(entity.alias)) errors.push(`Alias "${entity.alias}" is used twice.`);
     aliases.add(entity.alias);
-    typeOfAlias.set(entity.alias, entity.typeName);
     const names = new Set<string>();
     for (const property of entity.properties) {
       if (!MACHINE_NAME.test(property.name)) {
@@ -487,8 +482,8 @@ export function validateDraft(draft: BuilderDraft, fields: string[]): string[] {
     if (!MACHINE_NAME.test(relationship.typeName)) {
       errors.push(`Relationship "${relationship.typeName}" has an invalid name.`);
     }
-    const source = typeOfAlias.get(relationship.sourceAlias);
-    const target = typeOfAlias.get(relationship.targetAlias);
+    const source = typeOfKey.get(relationship.sourceKey);
+    const target = typeOfKey.get(relationship.targetKey);
     if (!source || !target) {
       errors.push(`Relationship ${label} must connect two entities of this draft.`);
       continue;
@@ -553,7 +548,7 @@ export function toSubmission(draft: BuilderDraft): {
       });
     }
   }
-  const typeOfAlias = new Map(draft.entities.map((e) => [e.alias, e.typeName]));
+  const entityOf = new Map(draft.entities.map((e) => [e.key, e]));
   const relationshipTypes = draft.base.relationship_types.map((t) => ({ ...t }));
   for (const relationship of draft.relationships) {
     const index = relationshipTypes.findIndex((t) => t.name === relationship.typeName);
@@ -565,8 +560,8 @@ export function toSubmission(draft: BuilderDraft): {
     } else {
       relationshipTypes.push({
         name: relationship.typeName,
-        source_entity_type: typeOfAlias.get(relationship.sourceAlias) ?? "",
-        target_entity_type: typeOfAlias.get(relationship.targetAlias) ?? "",
+        source_entity_type: entityOf.get(relationship.sourceKey)?.typeName ?? "",
+        target_entity_type: entityOf.get(relationship.targetKey)?.typeName ?? "",
         properties: mergeProperties([], relationship.properties),
       });
     }
@@ -583,8 +578,8 @@ export function toSubmission(draft: BuilderDraft): {
       })),
       relationships: draft.relationships.map((relationship) => ({
         relationship_type: relationship.typeName,
-        source: relationship.sourceAlias,
-        target: relationship.targetAlias,
+        source: entityOf.get(relationship.sourceKey)?.alias ?? "",
+        target: entityOf.get(relationship.targetKey)?.alias ?? "",
         properties: mapped(relationship.properties),
       })),
     },

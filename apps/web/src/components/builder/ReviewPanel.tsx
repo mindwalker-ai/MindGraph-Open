@@ -39,7 +39,7 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
   const [selection, setSelection] = useState<Selection>(
     draft.entities[0] ? { kind: "entity", key: draft.entities[0].key } : null,
   );
-  const typeOf = (alias: string) => draft.entities.find((e) => e.alias === alias)?.typeName ?? "?";
+  const typeOf = (key: string) => draft.entities.find((e) => e.key === key)?.typeName ?? "?";
   const entity =
     selection?.kind === "entity" ? draft.entities.find((e) => e.key === selection.key) : undefined;
   const relationship =
@@ -114,7 +114,7 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
                   )}
                 >
                   <span className="truncate font-mono text-xs">
-                    {typeOf(r.sourceAlias)} ─{r.typeName}→ {typeOf(r.targetAlias)}
+                    {typeOf(r.sourceKey)} ─{r.typeName}→ {typeOf(r.targetKey)}
                   </span>
                   <span className="flex shrink-0 items-center gap-1">
                     <ConfidenceBadge value={r.confidence} />
@@ -251,9 +251,9 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
                   }
                 />
               </label>
-              {(["sourceAlias", "targetAlias"] as const).map((end) => (
+              {(["sourceKey", "targetKey"] as const).map((end) => (
                 <label key={end} className="text-xs text-muted">
-                  {end === "sourceAlias" ? "Source" : "Target"}
+                  {end === "sourceKey" ? "Source" : "Target"}
                   <select
                     className={inputClass}
                     value={relationship[end]}
@@ -264,7 +264,7 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
                     }
                   >
                     {draft.entities.map((e) => (
-                      <option key={e.key} value={e.alias}>
+                      <option key={e.key} value={e.key}>
                         {e.alias} ({e.typeName})
                       </option>
                     ))}

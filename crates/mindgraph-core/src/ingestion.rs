@@ -175,11 +175,6 @@ impl IngestionService {
         })
     }
 
-    /// The shared job executor, for other job kinds.
-    pub(crate) const fn executor(&self) -> &JobExecutor {
-        &self.executor
-    }
-
     /// The metadata port.
     pub(crate) fn metadata(&self) -> &Arc<dyn MetadataStore> {
         &self.runner.metadata

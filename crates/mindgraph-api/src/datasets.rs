@@ -67,9 +67,10 @@ pub(crate) async fn create_ontology(
 ) -> Result<(StatusCode, Json<OntologyResponse>), ApiError> {
     let graph_id = graph_id(path)?;
     let Json(request) = body?;
+    let expected_version = request.expected_version;
     let ontology = state
         .ontology
-        .create_version(graph_id, &request.into())
+        .create_version_expecting(graph_id, &request.into(), expected_version)
         .await?;
     Ok((StatusCode::CREATED, Json(OntologyResponse::from(&ontology))))
 }

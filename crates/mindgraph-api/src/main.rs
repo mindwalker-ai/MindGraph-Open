@@ -94,6 +94,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         &ingestion,
         GraphBuilderConfig {
             max_repair_attempts: config.ai.max_repair_attempts,
+            job_concurrency: config.ai.job_concurrency,
         },
     )?;
     // Before serving: jobs of a previous process can never finish.

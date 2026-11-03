@@ -38,9 +38,10 @@ pub use ai::{
     SuggestionAnnotations, TypeAnnotation,
 };
 pub use graph_builder::{
-    GraphBuilderConfig, GraphBuilderResult, GraphBuilderService, MAX_REPAIR_ATTEMPTS,
-    MAX_SUGGESTED_ENTITY_TYPES, MAX_SUGGESTED_PROPERTIES, MAX_SUGGESTED_RELATIONSHIP_TYPES,
-    MAX_SUGGESTION_TEXT_CHARS, MAX_SUGGESTION_WARNINGS, validate_suggestion,
+    DEFAULT_AI_JOB_CONCURRENCY, GraphBuilderConfig, GraphBuilderResult, GraphBuilderService,
+    MAX_AI_JOB_CONCURRENCY, MAX_REPAIR_ATTEMPTS, MAX_SUGGESTED_ENTITY_TYPES,
+    MAX_SUGGESTED_PROPERTIES, MAX_SUGGESTED_RELATIONSHIP_TYPES, MAX_SUGGESTION_TEXT_CHARS,
+    MAX_SUGGESTION_WARNINGS, validate_suggestion,
 };
 
 pub use error::{ApplicationError, BoxError};

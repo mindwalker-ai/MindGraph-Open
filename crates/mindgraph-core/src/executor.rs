@@ -1,10 +1,11 @@
-//! The in-process background job executor shared by every job kind.
+//! The in-process background job executor.
 //!
 //! A dispatcher takes job ids from a bounded queue and runs at most
-//! `concurrency` jobs at a time (a semaphore), whatever their kind. Each
-//! [`JobKind`] has one [`JobHandler`]; the executor owns the lifecycle
+//! `concurrency` jobs at a time (a semaphore). Each [`JobKind`] it runs has
+//! one [`JobHandler`]; the executor owns the lifecycle
 //! (`queued → running → completed | failed`) and persists every transition
-//! through the [`MetadataStore`].
+//! through the [`MetadataStore`]. Analysis and ingestion share one executor;
+//! AI jobs have their own, so slow model calls never hold up dataset jobs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -147,7 +148,18 @@ async fn run_job(shared: &Shared, id: IngestionJobId) {
     match outcome {
         Ok(result) => match shared.metadata.complete_job(id, result.as_ref()).await {
             Ok(_) => info!(job_id = %id, kind = %job.kind, duration_ms, "job completed"),
-            Err(err) => warn!(job_id = %id, error = %err, "could not record a completed job"),
+            Err(err) => {
+                // For example a result the store refuses. A job left
+                // `running` would never reach a terminal state for clients.
+                warn!(job_id = %id, error = %err, "could not record a completed job");
+                let error = JobError::new(
+                    "RESULT_NOT_RECORDED",
+                    "the job finished but its result could not be stored",
+                );
+                if let Err(err) = shared.metadata.fail_job(id, &error).await {
+                    warn!(job_id = %id, error = %err, "could not record a failed job");
+                }
+            }
         },
         Err(error) => {
             handler.on_failure(&job).await;
@@ -156,5 +168,70 @@ async fn run_job(shared: &Shared, id: IngestionJobId) {
                 warn!(job_id = %id, error = %err, "could not record a failed job");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{SubsecRound, Utc};
+    use mindgraph_domain::{DataSource, DataSourceId, DataSourceKind};
+    use mindgraph_ingestion::IngestionSummary;
+
+    use super::*;
+    use crate::{CreateGraphProject, GraphProjectService, JobStatus, MemoryMetadataStore};
+
+    /// Returns an ingestion result, which the store refuses for an analysis
+    /// job: a result that cannot be recorded.
+    struct WrongResult;
+
+    #[async_trait]
+    impl JobHandler for WrongResult {
+        async fn run(&self, _: &IngestionJob) -> Result<Option<JobResult>, JobError> {
+            Ok(Some(JobResult::Ingestion(IngestionSummary::default())))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_result_that_cannot_be_recorded_fails_the_job() {
+        let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadataStore::new());
+        let graphs = GraphProjectService::bootstrap(Arc::clone(&metadata))
+            .await
+            .unwrap();
+        let graph = graphs
+            .create_graph(CreateGraphProject {
+                name: "Jobs".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        let now = Utc::now().trunc_subsecs(6);
+        let source = DataSource::new(
+            DataSourceId::new(),
+            graph.id(),
+            DataSourceKind::Csv,
+            "a.csv",
+            1,
+            &"0".repeat(64),
+            now,
+        )
+        .unwrap();
+        metadata.create_data_source(&source, "a").await.unwrap();
+        let executor = JobExecutor::start(Arc::clone(&metadata), 1, 1);
+        executor.register(JobKind::Analyze, Arc::new(WrongResult));
+        let job = IngestionJob::analysis(graph.id(), source.id(), now);
+        executor.submit(&job).await.unwrap();
+
+        let mut stored = metadata.get_job(job.id).await.unwrap().unwrap();
+        for _ in 0..400 {
+            if !matches!(stored.status, JobStatus::Queued | JobStatus::Running) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            stored = metadata.get_job(job.id).await.unwrap().unwrap();
+        }
+        assert_eq!(stored.status, JobStatus::Failed);
+        assert_eq!(stored.error.unwrap().code, "RESULT_NOT_RECORDED");
     }
 }

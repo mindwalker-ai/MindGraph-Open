@@ -128,6 +128,7 @@ export function GraphBuilder({ graphId, api: injected, pollMs = 750 }: GraphBuil
       : !draft
         ? 2
         : generation.stage === "idle" ||
+            generation.stage === "saving" ||
             (generation.stage === "failed" && !generation.ontologySaved)
           ? 3
           : 4;
@@ -213,7 +214,8 @@ export function GraphBuilder({ graphId, api: injected, pollMs = 750 }: GraphBuil
           return;
         }
         if (!ontologyUnchanged(draft.base, next)) {
-          const created = await api.createOntology(graphId, next);
+          // The server re-checks the version atomically.
+          const created = await api.createOntology(graphId, next, baseVersion ?? undefined);
           setOntology(created);
           // Later retries and edits build on the saved version.
           setBaseVersion(created.version);
@@ -223,11 +225,15 @@ export function GraphBuilder({ graphId, api: injected, pollMs = 750 }: GraphBuil
         setGeneration({
           stage: "failed",
           ontologySaved: false,
-          message: `The ontology could not be saved: ${message(error)}`,
+          message:
+            error instanceof ApiError && error.status === 409
+              ? "The ontology changed since this draft was created. Discard the draft and start again."
+              : `The ontology could not be saved: ${message(error)}`,
         });
         return;
       }
     }
+    let completed = false;
     try {
       setGeneration({ stage: "running", job: null });
       const accepted = await api.startIngestion(graphId, source.id, mapping, ingestionKey.current);
@@ -237,7 +243,7 @@ export function GraphBuilder({ graphId, api: injected, pollMs = 750 }: GraphBuil
       if (job.status === "completed") {
         setGeneration({ stage: "completed", job });
         ingestionKey.current = null;
-        setGraph(await api.getGraph(graphId));
+        completed = true;
       } else {
         ingestionKey.current = null;
         setGeneration({
@@ -255,6 +261,16 @@ export function GraphBuilder({ graphId, api: injected, pollMs = 750 }: GraphBuil
         ontologySaved: true,
         message: `Ontology saved successfully. Graph generation could not start: ${message(error)}`,
       });
+    }
+    if (completed) {
+      // Only refreshes the status badge: a failure here must not turn a
+      // finished ingestion into a failed one (and invite a second ingestion).
+      try {
+        const refreshed = await api.getGraph(graphId);
+        if (alive.current) setGraph(refreshed);
+      } catch {
+        // Keep the previous graph details.
+      }
     }
   }
 
