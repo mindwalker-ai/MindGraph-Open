@@ -57,6 +57,14 @@ pub enum ApplicationError {
         message: String,
     },
 
+    /// The AI Graph Builder is disabled (no provider configured).
+    #[error("the AI Graph Builder is not configured")]
+    AiNotConfigured,
+
+    /// The AI service cannot be reached.
+    #[error("the AI service is unavailable")]
+    AiUnavailable,
+
     /// A required backend (metadata database, graph store, source storage)
     /// is unavailable, or the job queue is full.
     #[error("a required backend is unavailable")]

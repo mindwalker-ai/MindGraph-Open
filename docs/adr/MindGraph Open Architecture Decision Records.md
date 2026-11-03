@@ -194,6 +194,20 @@ mindgraph-api       HTTP transport, configuration, composition root
 `mindgraph-metadata` depends on `mindgraph-core` (for the port) and
 `mindgraph-domain`. Neither of those depends on SQLx or PostgreSQL.
 
+## Refinement (M5, approved)
+
+`crates/mindgraph-ai-client/` was added during M5. Like `mindgraph-metadata`
+it is an infrastructure adapter crate, not a runtime service:
+
+```text
+mindgraph-core       GraphBuilderAi port, GraphBuilderService, validation
+mindgraph-ai-client  HTTP adapter to the internal AI service (reqwest)
+mindgraph-api        composition root: HttpGraphBuilderAi, or AI disabled
+```
+
+`mindgraph-ai-client` depends on `mindgraph-core` (for the port). The
+application layer never depends on an HTTP client.
+
 ## Rejected
 
 Microservice-per-domain architecture.
@@ -732,6 +746,18 @@ use MCP graph tools
 ```
 
 ---
+
+## Refinement (M5, approved)
+
+The first internal endpoint is `POST /internal/v1/graph-builder/suggest`
+(one ontology + mapping suggestion per dataset) together with `GET /ready`.
+The only provider implementation in v0.1 is a generic OpenAI-compatible
+chat-completions adapter, which also covers local servers (Ollama, vLLM,
+llama.cpp). The validation chain above is implemented as: strict JSON →
+Pydantic schema (AI service) → explicit DTOs (`mindgraph-ai-client`) →
+domain constructors, base-ontology preservation and M4 `validate_mapping`
+(Rust, authoritative) → at most two repair attempts → a job result that the
+user reviews before anything is persisted.
 
 # ADR-008: Dataset Ingestion and AI Graph Builder Pipeline
 

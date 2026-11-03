@@ -175,7 +175,7 @@ async fn load(bench: &Bench, label: &str, csv: &str, rows: usize, mapping: Inges
         .await
         .unwrap();
     let (job, ingestion_time) = wait(bench, job.id).await;
-    let summary = job.result.unwrap();
+    let summary = *job.ingestion_summary().unwrap();
     assert_eq!(summary.records_processed, rows as u64);
     eprintln!(
         "{label:>9}: {rows} rows ({} KiB) | analysis {analysis_time:.2?} ({:.0} rows/s) | \

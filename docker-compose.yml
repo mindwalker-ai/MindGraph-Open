@@ -52,7 +52,11 @@ services:
       MINDGRAPH_MAX_INGESTION_RECORDS: ${MINDGRAPH_MAX_INGESTION_RECORDS:-100000}
       MINDGRAPH_INGESTION_BATCH_SIZE: ${MINDGRAPH_INGESTION_BATCH_SIZE:-500}
       MINDGRAPH_JOB_CONCURRENCY: ${MINDGRAPH_JOB_CONCURRENCY:-2}
+      # The internal AI service (M5). Remove it to disable the AI Graph
+      # Builder in core; core never waits for the AI service.
       MINDGRAPH_AI_URL: http://ai:8000
+      MINDGRAPH_AI_TIMEOUT_SECONDS: ${MINDGRAPH_AI_TIMEOUT_SECONDS:-300}
+      MINDGRAPH_AI_MAX_REPAIR_ATTEMPTS: ${MINDGRAPH_AI_MAX_REPAIR_ATTEMPTS:-1}
       MINDGRAPH_TELEMETRY_ENABLED: ${MINDGRAPH_TELEMETRY_ENABLED:-false}
       RUST_LOG: ${RUST_LOG:-info}
     # Core deliberately does not depend on `ai`: graph features must keep
@@ -79,10 +83,21 @@ services:
       dockerfile: ../../docker/ai.Dockerfile
     expose:
       - "8000"
+    # AI is optional: with MINDGRAPH_LLM_PROVIDER empty the service still
+    # starts, /ready reports not_configured, and every manual flow works.
     environment:
       MINDGRAPH_LLM_PROVIDER: ${MINDGRAPH_LLM_PROVIDER:-}
+      MINDGRAPH_LLM_BASE_URL: ${MINDGRAPH_LLM_BASE_URL:-}
+      MINDGRAPH_LLM_MODEL: ${MINDGRAPH_LLM_MODEL:-}
       MINDGRAPH_LLM_API_KEY: ${MINDGRAPH_LLM_API_KEY:-}
+      MINDGRAPH_LLM_TIMEOUT_SECONDS: ${MINDGRAPH_LLM_TIMEOUT_SECONDS:-60}
+      MINDGRAPH_LLM_MAX_OUTPUT_TOKENS: ${MINDGRAPH_LLM_MAX_OUTPUT_TOKENS:-4096}
+      MINDGRAPH_LLM_JSON_MODE: ${MINDGRAPH_LLM_JSON_MODE:-true}
       MINDGRAPH_TELEMETRY_ENABLED: ${MINDGRAPH_TELEMETRY_ENABLED:-false}
+    # Lets a model server on the host (for example Ollama) be reached as
+    # http://host.docker.internal:11434/v1 on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test:
         - CMD

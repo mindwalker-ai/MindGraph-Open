@@ -1,4 +1,5 @@
-//! Background job records: dataset analysis and ingestion.
+//! Background job records: dataset analysis, ingestion and AI Graph
+//! Builder suggestions.
 //!
 //! Job state is persisted through the [`MetadataStore`](crate::MetadataStore)
 //! and moves only along controlled transitions:
@@ -9,8 +10,8 @@
 //!    └─────────────────► failed      (restart recovery, queue rejection)
 //! ```
 //!
-//! `cancelled` exists in the schema, but M4 offers no cancellation (see the
-//! M4 limitations in the architecture notes).
+//! `cancelled` exists in the schema, but no job can be cancelled yet (see the
+//! limitations in the architecture notes).
 
 use std::fmt;
 use std::str::FromStr;
@@ -19,6 +20,8 @@ use chrono::{DateTime, Utc};
 use mindgraph_domain::{DataSourceId, DomainError, GraphId, IngestionJobId, OntologyVersion};
 use mindgraph_ingestion::{IngestionMapping, IngestionSummary};
 
+use crate::GraphBuilderResult;
+
 /// What a job does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobKind {
@@ -26,6 +29,8 @@ pub enum JobKind {
     Analyze,
     /// Writes a data source into the graph.
     Ingest,
+    /// Asks the AI Graph Builder for an ontology and mapping suggestion.
+    AiSuggest,
 }
 
 impl JobKind {
@@ -35,6 +40,7 @@ impl JobKind {
         match self {
             Self::Analyze => "analyze",
             Self::Ingest => "ingest",
+            Self::AiSuggest => "ai_suggest",
         }
     }
 }
@@ -52,6 +58,7 @@ impl FromStr for JobKind {
         match value {
             "analyze" => Ok(Self::Analyze),
             "ingest" => Ok(Self::Ingest),
+            "ai_suggest" => Ok(Self::AiSuggest),
             other => Err(unknown("job kind", other)),
         }
     }
@@ -144,7 +151,28 @@ impl JobError {
     }
 }
 
-/// A persisted analysis or ingestion job.
+/// What a completed job produced. Analysis jobs have no result: the
+/// profile is stored on the data source.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobResult {
+    /// Counters of an ingestion job.
+    Ingestion(IngestionSummary),
+    /// The validated suggestion of an AI Graph Builder job.
+    GraphBuilder(Box<GraphBuilderResult>),
+}
+
+impl JobResult {
+    /// The job kind this result belongs to.
+    #[must_use]
+    pub const fn kind(&self) -> JobKind {
+        match self {
+            Self::Ingestion(_) => JobKind::Ingest,
+            Self::GraphBuilder(_) => JobKind::AiSuggest,
+        }
+    }
+}
+
+/// A persisted analysis, ingestion or AI suggestion job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestionJob {
     /// The job id.
@@ -159,8 +187,10 @@ pub struct IngestionJob {
     pub status: JobStatus,
     /// `0.0..=1.0`; never decreases; `1.0` once completed.
     pub progress: f64,
-    /// The ontology version an ingestion was validated against (pinned).
-    /// Always set for [`JobKind::Ingest`], never for [`JobKind::Analyze`].
+    /// The ontology version the job is pinned to: the version an ingestion
+    /// was validated against, or the base of an AI suggestion. Set for
+    /// [`JobKind::Ingest`] and [`JobKind::AiSuggest`], never for
+    /// [`JobKind::Analyze`].
     pub ontology_version: Option<OntologyVersion>,
     /// The client's `Idempotency-Key`, unique per graph.
     pub idempotency_key: Option<String>,
@@ -168,8 +198,8 @@ pub struct IngestionJob {
     pub mapping: Option<IngestionMapping>,
     /// Why the job failed.
     pub error: Option<JobError>,
-    /// The counters of a completed ingestion.
-    pub result: Option<IngestionSummary>,
+    /// What a completed ingestion or AI suggestion produced.
+    pub result: Option<JobResult>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last changed.
@@ -216,9 +246,47 @@ impl IngestionJob {
         }
     }
 
+    /// A queued AI Graph Builder job whose suggestion builds on
+    /// `ontology_version` (pinned).
+    #[must_use]
+    pub fn graph_builder(
+        graph_id: GraphId,
+        data_source_id: DataSourceId,
+        ontology_version: OntologyVersion,
+        idempotency_key: String,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            kind: JobKind::AiSuggest,
+            ontology_version: Some(ontology_version),
+            idempotency_key: Some(idempotency_key),
+            ..Self::analysis(graph_id, data_source_id, now)
+        }
+    }
+
+    /// The counters of a completed ingestion job.
+    #[must_use]
+    pub fn ingestion_summary(&self) -> Option<&IngestionSummary> {
+        match &self.result {
+            Some(JobResult::Ingestion(summary)) => Some(summary),
+            _ => None,
+        }
+    }
+
+    /// The result of a completed AI Graph Builder job.
+    #[must_use]
+    pub fn graph_builder_result(&self) -> Option<&GraphBuilderResult> {
+        match &self.result {
+            Some(JobResult::GraphBuilder(result)) => Some(result),
+            _ => None,
+        }
+    }
+
     /// Checks the invariants of a job about to be stored: queued, no
-    /// progress, error or result, and a pinned ontology version plus mapping
-    /// exactly for ingestion jobs. Metadata stores call this in `create_job`.
+    /// progress, error or result; a pinned ontology version plus mapping for
+    /// ingestion jobs; a pinned version and an idempotency key, but no
+    /// mapping, for AI suggestion jobs. Metadata stores call this in
+    /// `create_job`.
     ///
     /// # Errors
     ///
@@ -239,6 +307,16 @@ impl IngestionJob {
             JobKind::Analyze if self.ontology_version.is_some() || self.mapping.is_some() => {
                 invalid("analysis jobs have no ontology version or mapping")
             }
+            JobKind::AiSuggest
+                if self.ontology_version.is_none()
+                    || self.mapping.is_some()
+                    || self.idempotency_key.is_none() =>
+            {
+                invalid(
+                    "AI suggestion jobs need a pinned ontology version and an idempotency key, \
+                     and have no mapping",
+                )
+            }
             _ if self.idempotency_key.as_deref().is_some_and(str::is_empty) => {
                 invalid("idempotency keys must not be empty")
             }
@@ -253,7 +331,7 @@ mod tests {
 
     #[test]
     fn names_round_trip() {
-        for kind in [JobKind::Analyze, JobKind::Ingest] {
+        for kind in [JobKind::Analyze, JobKind::Ingest, JobKind::AiSuggest] {
             assert_eq!(kind.as_str().parse::<JobKind>().unwrap(), kind);
         }
         for status in [

@@ -20,6 +20,7 @@ mindgraph-core = { path = "crates/mindgraph-core" }
 mindgraph-metadata = { path = "crates/mindgraph-metadata" }
 mindgraph-graph = { path = "crates/mindgraph-graph", default-features = false }
 mindgraph-ingestion = { path = "crates/mindgraph-ingestion" }
+mindgraph-ai-client = { path = "crates/mindgraph-ai-client" }
 
 # Domain
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }

@@ -12,8 +12,8 @@ publish.workspace = true
 # here, in the outermost layer, so dependencies keep pointing inward:
 # api -> core -> domain. This crate is also the composition root that wires
 # the adapters into the application layer: PostgreSQL (mindgraph-metadata),
-# HugeGraph (mindgraph-graph, `hugegraph` feature) and local source storage
-# (mindgraph-ingestion).
+# HugeGraph (mindgraph-graph, `hugegraph` feature), local source storage
+# (mindgraph-ingestion) and the internal AI service (mindgraph-ai-client).
 [[bin]]
 name = "mindgraph-core"
 path = "src/main.rs"
@@ -22,6 +22,7 @@ path = "src/main.rs"
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+mindgraph-ai-client.workspace = true
 mindgraph-core.workspace = true
 mindgraph-domain.workspace = true
 mindgraph-graph = { workspace = true, features = ["hugegraph"] }

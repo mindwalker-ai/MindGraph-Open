@@ -1,7 +1,8 @@
 //! Data sources and jobs in PostgreSQL (M4).
 //!
 //! The JSON columns hold the public contract types of `mindgraph-ingestion`
-//! (`DatasetProfile`, `IngestionMapping`, `IngestionSummary`), which reject
+//! (`DatasetProfile`, `IngestionMapping`, `IngestionSummary`) and of
+//! `mindgraph-core` (`GraphBuilderResult`), which reject
 //! unknown fields, so a stored document that no longer matches is reported
 //! as corrupt instead of being half-read.
 
@@ -9,6 +10,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use mindgraph_core::{
     DataSourceRecord, IngestionJob, JobError, JobKind, JobStatus, MetadataStore, MetadataStoreError,
 };
+use mindgraph_core::{GraphBuilderResult, JobResult};
 use mindgraph_domain::{
     DataSource, DataSourceId, GraphId, GraphProject, GraphStatus, IngestionJobId,
 };
@@ -96,6 +98,30 @@ fn decode_source(row: &PgRow) -> Result<DataSourceRecord, MetadataStoreError> {
     })
 }
 
+/// `result_json` holds the inner value; the job kind says which type it is.
+fn decode_result(kind: JobKind, value: Value) -> Result<JobResult, MetadataStoreError> {
+    match kind {
+        JobKind::Ingest => Ok(JobResult::Ingestion(from_json::<IngestionSummary>(
+            "job result",
+            value,
+        )?)),
+        JobKind::AiSuggest => Ok(JobResult::GraphBuilder(Box::new(from_json::<
+            GraphBuilderResult,
+        >(
+            "AI suggestion result",
+            value,
+        )?))),
+        JobKind::Analyze => Err(corrupt("job result", "analysis jobs have no result")),
+    }
+}
+
+fn encode_result(result: &JobResult) -> Result<Value, MetadataStoreError> {
+    match result {
+        JobResult::Ingestion(summary) => to_json("job result", summary),
+        JobResult::GraphBuilder(result) => to_json("AI suggestion result", result.as_ref()),
+    }
+}
+
 fn decode_job(row: &PgRow) -> Result<IngestionJob, MetadataStoreError> {
     let read = |err| map_error("reading a job", err);
     let id: Uuid = row.try_get("id").map_err(read)?;
@@ -122,14 +148,15 @@ fn decode_job(row: &PgRow) -> Result<IngestionJob, MetadataStoreError> {
             ));
         }
     };
+    let kind = kind
+        .parse::<JobKind>()
+        .map_err(|err| corrupt("job kind", err))?;
     Ok(IngestionJob {
         id: IngestionJobId::from_uuid(id).map_err(|err| corrupt("job id", err))?,
         graph_id: GraphId::from_uuid(graph_id).map_err(|err| corrupt("graph id", err))?,
         data_source_id: DataSourceId::from_uuid(data_source_id)
             .map_err(|err| corrupt("data source id", err))?,
-        kind: kind
-            .parse::<JobKind>()
-            .map_err(|err| corrupt("job kind", err))?,
+        kind,
         status: status
             .parse::<JobStatus>()
             .map_err(|err| corrupt("job status", err))?,
@@ -140,9 +167,7 @@ fn decode_job(row: &PgRow) -> Result<IngestionJob, MetadataStoreError> {
             .map(|value| from_json::<IngestionMapping>("ingestion mapping", value))
             .transpose()?,
         error,
-        result: result
-            .map(|value| from_json::<IngestionSummary>("job result", value))
-            .transpose()?,
+        result: result.map(|value| decode_result(kind, value)).transpose()?,
         created_at,
         updated_at,
     })
@@ -430,11 +455,19 @@ impl PostgresMetadataStore {
     pub(crate) async fn complete_job_row(
         &self,
         id: IngestionJobId,
-        result: Option<&IngestionSummary>,
+        result: Option<&JobResult>,
     ) -> Result<IngestionJob, MetadataStoreError> {
-        let result = result
-            .map(|summary| to_json("job result", summary))
-            .transpose()?;
+        if let Some(result) = result
+            && let Some(job) = self.select_job(id).await?
+            && job.kind != result.kind()
+        {
+            return Err(MetadataStoreError::InvalidInput(format!(
+                "a {} result cannot complete {} job {id}",
+                result.kind(),
+                job.kind
+            )));
+        }
+        let result = result.map(encode_result).transpose()?;
         let row = sqlx::query(concat!(
             "UPDATE ingestion_jobs SET status = 'completed', progress = 1, result_json = $2, \
              updated_at = GREATEST(updated_at, $3) WHERE id = $1 AND status = 'running' RETURNING ",

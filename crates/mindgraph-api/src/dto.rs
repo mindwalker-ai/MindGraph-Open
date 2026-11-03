@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use mindgraph_core::{
-    DataSourceView, EntityTypeInput, IngestionJob, OntologyDefinition, PropertyInput,
-    RelationshipTypeInput,
+    AiStatus, DataSourceView, EntityTypeInput, GraphBuilderResult, IngestionJob, JobResult,
+    OntologyDefinition, PropertyInput, RelationshipTypeInput,
 };
 use mindgraph_domain::{
     EntityType, GraphProject, Ontology, PropertiesSchema, PropertyType, RelationshipType,
@@ -286,6 +286,24 @@ struct JobErrorResponse {
     message: String,
 }
 
+/// What a completed job produced, by job kind: ingestion counters, or the
+/// validated AI suggestion. Analysis jobs have none (`null`).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum JobResultResponse {
+    Ingestion(IngestionSummary),
+    GraphBuilder(Box<GraphBuilderResult>),
+}
+
+impl From<&JobResult> for JobResultResponse {
+    fn from(result: &JobResult) -> Self {
+        match result {
+            JobResult::Ingestion(summary) => Self::Ingestion(*summary),
+            JobResult::GraphBuilder(result) => Self::GraphBuilder(result.clone()),
+        }
+    }
+}
+
 /// A job. The mapping and idempotency key are not echoed.
 #[derive(Debug, Serialize)]
 pub(crate) struct JobResponse {
@@ -297,7 +315,7 @@ pub(crate) struct JobResponse {
     progress: f64,
     ontology_version: Option<u32>,
     error: Option<JobErrorResponse>,
-    result: Option<IngestionSummary>,
+    result: Option<JobResultResponse>,
     created_at: String,
     updated_at: String,
 }
@@ -316,7 +334,7 @@ impl From<&IngestionJob> for JobResponse {
                 code: error.code.clone(),
                 message: error.message.clone(),
             }),
-            result: job.result,
+            result: job.result.as_ref().map(JobResultResponse::from),
             created_at: timestamp(job.created_at),
             updated_at: timestamp(job.updated_at),
         }
@@ -353,6 +371,42 @@ impl From<&IngestionJob> for JobAcceptedResponse {
         Self {
             job_id: job.id.to_string(),
             status: job.status.as_str(),
+        }
+    }
+}
+
+/// `GET /api/v1/graph-builder/status`. Never contains URLs or credentials.
+#[derive(Debug, Serialize)]
+pub(crate) struct GraphBuilderStatusResponse {
+    status: &'static str,
+    configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+impl From<AiStatus> for GraphBuilderStatusResponse {
+    fn from(status: AiStatus) -> Self {
+        match status {
+            AiStatus::Ready { provider, model } => Self {
+                status: "ready",
+                configured: true,
+                provider: Some(provider),
+                model: Some(model),
+            },
+            AiStatus::NotConfigured => Self {
+                status: "not_configured",
+                configured: false,
+                provider: None,
+                model: None,
+            },
+            AiStatus::Unavailable => Self {
+                status: "unavailable",
+                configured: true,
+                provider: None,
+                model: None,
+            },
         }
     }
 }

@@ -9,8 +9,9 @@
 //!                 ─► graph draft → active, job completed
 //! ```
 //!
-//! Jobs run in-process on Tokio. A dispatcher takes job ids from a bounded
-//! queue and runs at most `job_concurrency` of them at a time (a semaphore).
+//! Jobs run in-process on Tokio through the shared executor: a dispatcher
+//! takes job ids from a bounded queue and runs at most `job_concurrency` of
+//! them at a time (a semaphore), whatever their kind.
 //! Job state is persisted in the [`MetadataStore`] after every transition,
 //! so clients poll it (or follow it over SSE) and a restart can detect jobs
 //! that were cut off ([`IngestionService::recover_incomplete_jobs`]).
@@ -19,7 +20,6 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{SubsecRound, Utc};
@@ -33,10 +33,12 @@ use mindgraph_ingestion::{
     ProgressSink, SourceStore, SourceWriter, UploadDigest, profile_dataset, run_ingestion,
     validate_mapping,
 };
-use tokio::sync::{Semaphore, mpsc};
 use tracing::{info, warn};
 
-use crate::{ApplicationError, IngestionJob, JobError, JobKind, MetadataStore, MetadataStoreError};
+use crate::executor::{JobExecutor, JobHandler};
+use crate::{
+    ApplicationError, IngestionJob, JobError, JobKind, JobResult, MetadataStore, MetadataStoreError,
+};
 
 /// The default upload limit: 50 MiB.
 pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
@@ -93,7 +95,7 @@ pub struct DataSourceView {
 #[derive(Clone)]
 pub struct IngestionService {
     runner: Arc<Runner>,
-    queue: mpsc::Sender<IngestionJobId>,
+    executor: JobExecutor,
     workspace_id: WorkspaceId,
 }
 
@@ -106,8 +108,7 @@ impl std::fmt::Debug for IngestionService {
     }
 }
 
-/// What a worker needs. Does not hold the queue sender, so dropping every
-/// [`IngestionService`] handle stops the dispatcher.
+/// The worker of analysis and ingestion jobs.
 struct Runner {
     metadata: Arc<dyn MetadataStore>,
     graph: Arc<dyn GraphStore>,
@@ -153,6 +154,11 @@ impl IngestionService {
                 "job concurrency, queue capacity and upload limit must be positive".to_owned(),
             ));
         }
+        let executor = JobExecutor::start(
+            Arc::clone(&ports.metadata),
+            config.job_concurrency,
+            config.queue_capacity,
+        );
         let runner = Arc::new(Runner {
             metadata: ports.metadata,
             graph: ports.graph,
@@ -160,13 +166,23 @@ impl IngestionService {
             config,
             graph_locks: std::sync::Mutex::default(),
         });
-        let (queue, receiver) = mpsc::channel(config.queue_capacity);
-        tokio::spawn(dispatch(Arc::clone(&runner), receiver));
+        executor.register(JobKind::Analyze, Arc::clone(&runner) as Arc<dyn JobHandler>);
+        executor.register(JobKind::Ingest, Arc::clone(&runner) as Arc<dyn JobHandler>);
         Ok(Self {
             runner,
-            queue,
+            executor,
             workspace_id,
         })
+    }
+
+    /// The shared job executor, for other job kinds.
+    pub(crate) const fn executor(&self) -> &JobExecutor {
+        &self.executor
+    }
+
+    /// The metadata port.
+    pub(crate) fn metadata(&self) -> &Arc<dyn MetadataStore> {
+        &self.runner.metadata
     }
 
     /// The configured bounds.
@@ -244,7 +260,8 @@ impl IngestionService {
         })
     }
 
-    async fn record(
+    /// The data source of a graph in the local workspace.
+    pub(crate) async fn record(
         &self,
         graph_id: GraphId,
         id: DataSourceId,
@@ -372,16 +389,9 @@ impl IngestionService {
         Ok(job)
     }
 
-    /// Persists a queued job and hands it to the dispatcher. The queue slot
-    /// is reserved first, so a full queue stores nothing.
+    /// Persists a queued job and hands it to the executor.
     async fn enqueue(&self, job: &IngestionJob) -> Result<(), ApplicationError> {
-        let permit = self
-            .queue
-            .try_reserve()
-            .map_err(|_| ApplicationError::unavailable("the job queue is full; try again later"))?;
-        self.runner.metadata.create_job(job).await?;
-        permit.send(job.id);
-        Ok(())
+        self.executor.submit(job).await
     }
 
     /// Reads a job.
@@ -415,7 +425,7 @@ fn base_name(filename: &str) -> &str {
     filename.rsplit(['/', '\\']).next().unwrap_or(filename)
 }
 
-fn validate_idempotency_key(key: &str) -> Result<(), ApplicationError> {
+pub(crate) fn validate_idempotency_key(key: &str) -> Result<(), ApplicationError> {
     let valid = (1..=MAX_IDEMPOTENCY_KEY_CHARS).contains(&key.len())
         && key.bytes().all(|b| b.is_ascii_graphic());
     if valid {
@@ -545,32 +555,7 @@ impl UploadSession {
     }
 }
 
-async fn dispatch(runner: Arc<Runner>, mut queue: mpsc::Receiver<IngestionJobId>) {
-    let workers = Arc::new(Semaphore::new(runner.config.job_concurrency));
-    while let Some(id) = queue.recv().await {
-        let Ok(permit) = Arc::clone(&workers).acquire_owned().await else {
-            break;
-        };
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move {
-            // A panicking job must not stay `running`: run it in its own
-            // task and fail it if that task dies.
-            let job = tokio::spawn({
-                let runner = Arc::clone(&runner);
-                async move { runner.run(id).await }
-            });
-            if job.await.is_err() {
-                let error = JobError::new("INTERNAL_ERROR", "the job stopped unexpectedly");
-                if let Err(err) = runner.metadata.fail_job(id, &error).await {
-                    warn!(job_id = %id, error = %err, "could not record a crashed job");
-                }
-            }
-            drop(permit);
-        });
-    }
-}
-
-fn metadata_failure(error: &MetadataStoreError) -> JobError {
+pub(crate) fn metadata_failure(error: &MetadataStoreError) -> JobError {
     match error {
         MetadataStoreError::BackendUnavailable { .. } => JobError::new(
             "METADATA_UNAVAILABLE",
@@ -617,57 +602,52 @@ impl Read for CountingReader {
     }
 }
 
-impl Runner {
-    async fn run(&self, id: IngestionJobId) {
-        let job = match self.metadata.start_job(id).await {
-            Ok(job) => job,
-            Err(err) => {
-                // For example failed by restart recovery while queued.
-                warn!(job_id = %id, error = %err, "job could not start");
-                return;
+#[async_trait]
+impl JobHandler for Runner {
+    async fn run(&self, job: &IngestionJob) -> Result<Option<JobResult>, JobError> {
+        match job.kind {
+            JobKind::Analyze => {
+                let profile = self.analyze(job).await?;
+                info!(
+                    job_id = %job.id,
+                    record_count = profile.record_count,
+                    fields = profile.fields.len(),
+                    "dataset analysed"
+                );
+                Ok(None)
             }
-        };
-        let started = Instant::now();
-        info!(job_id = %id, graph_id = %job.graph_id, data_source_id = %job.data_source_id, kind = %job.kind, "job started");
-        let outcome = match job.kind {
-            JobKind::Analyze => self.analyze(&job).await.map(|profile| {
-                info!(job_id = %id, record_count = profile.record_count, fields = profile.fields.len(), "dataset analysed");
-                None
-            }),
-            JobKind::Ingest => self.ingest(&job).await.map(Some),
-        };
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        match outcome {
-            Ok(result) => match self.metadata.complete_job(id, result.as_ref()).await {
-                Ok(_) => info!(
-                    job_id = %id,
-                    kind = %job.kind,
-                    duration_ms,
-                    records_processed = result.map(|r| r.records_processed),
-                    entities_created = result.map(|r| r.entities_created),
-                    entities_matched = result.map(|r| r.entities_matched),
-                    relationships_created = result.map(|r| r.relationships_created),
-                    "job completed"
-                ),
-                Err(err) => warn!(job_id = %id, error = %err, "could not record a completed job"),
-            },
-            Err(error) => {
-                if job.kind == JobKind::Analyze
-                    && let Err(err) = self
-                        .metadata
-                        .mark_data_source_failed(job.graph_id, job.data_source_id)
-                        .await
-                {
-                    warn!(job_id = %id, error = %err, "could not mark the data source failed");
-                }
-                warn!(job_id = %id, kind = %job.kind, code = %error.code, duration_ms, "job failed");
-                if let Err(err) = self.metadata.fail_job(id, &error).await {
-                    warn!(job_id = %id, error = %err, "could not record a failed job");
-                }
+            JobKind::Ingest => {
+                let summary = self.ingest(job).await?;
+                info!(
+                    job_id = %job.id,
+                    records_processed = summary.records_processed,
+                    entities_created = summary.entities_created,
+                    entities_matched = summary.entities_matched,
+                    relationships_created = summary.relationships_created,
+                    "dataset ingested"
+                );
+                Ok(Some(JobResult::Ingestion(summary)))
             }
+            JobKind::AiSuggest => Err(JobError::new(
+                "INTERNAL_ERROR",
+                "the ingestion worker cannot run AI jobs",
+            )),
         }
     }
 
+    async fn on_failure(&self, job: &IngestionJob) {
+        if job.kind == JobKind::Analyze
+            && let Err(err) = self
+                .metadata
+                .mark_data_source_failed(job.graph_id, job.data_source_id)
+                .await
+        {
+            warn!(job_id = %job.id, error = %err, "could not mark the data source failed");
+        }
+    }
+}
+
+impl Runner {
     async fn source(&self, job: &IngestionJob) -> Result<crate::DataSourceRecord, JobError> {
         self.metadata
             .get_data_source(job.graph_id, job.data_source_id)

@@ -4,19 +4,23 @@
 //! config → PostgreSQL pool → migrations ─► PostgresMetadataStore ─┬► GraphProjectService
 //!        → HugeGraph schema (ensure_schema) ─► HugeGraphStore ──┐  ├► OntologyService
 //!        → <data dir>/sources ─► LocalSourceStore ──────────────┴──┴► IngestionService
+//!        → MINDGRAPH_AI_URL ─► HttpGraphBuilderAi (or AI disabled) ─► GraphBuilderService
 //!        → restart recovery (fail cut-off jobs) → router → serve
 //! ```
 //!
 //! Startup fails fast when PostgreSQL or HugeGraph is unreachable; Docker's
-//! restart policy restarts the process. The Python AI service is not needed
-//! (ADR-007): nothing here reads `MINDGRAPH_AI_URL`.
+//! restart policy restarts the process. The Python AI service is optional
+//! (ADR-007): it is never contacted at startup, and every manual flow works
+//! without it.
 
 use std::error::Error;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use mindgraph_ai_client::HttpGraphBuilderAi;
 use mindgraph_api::{AppState, Config, SERVICE_NAME, router};
 use mindgraph_core::{
+    DisabledGraphBuilderAi, GraphBuilderAi, GraphBuilderConfig, GraphBuilderService,
     GraphProjectService, IngestionPorts, IngestionService, MetadataStore, OntologyService,
 };
 use mindgraph_graph::{HugeGraphConfig, HugeGraphStore};
@@ -75,9 +79,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
         workspace_id,
         config.ingestion,
     )?;
+    let ai: Arc<dyn GraphBuilderAi> = match config.ai.url() {
+        Some(url) => {
+            tracing::info!("AI Graph Builder enabled (internal AI service)");
+            Arc::new(HttpGraphBuilderAi::new(url, config.ai.timeout)?)
+        }
+        None => {
+            tracing::info!("AI Graph Builder disabled (MINDGRAPH_AI_URL is not set)");
+            Arc::new(DisabledGraphBuilderAi)
+        }
+    };
+    let graph_builder = GraphBuilderService::new(
+        ai,
+        &ingestion,
+        GraphBuilderConfig {
+            max_repair_attempts: config.ai.max_repair_attempts,
+        },
+    )?;
     // Before serving: jobs of a previous process can never finish.
     ingestion.recover_incomplete_jobs().await?;
-    let app = router(AppState::new(graph_projects, ontology, ingestion));
+    let app = router(
+        AppState::new(graph_projects, ontology, ingestion).with_graph_builder(graph_builder),
+    );
 
     let listener = TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "{SERVICE_NAME} listening");

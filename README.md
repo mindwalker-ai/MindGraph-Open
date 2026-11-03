@@ -44,8 +44,27 @@ curl http://localhost:8080/api/v1/graphs/<graph_id>/ontology
 ```
 
 Graph projects are stored in PostgreSQL and survive restarts. Each new graph
-starts with an empty, active ontology v1. The full API is described in
+starts with an empty, active ontology v1. (Port 8080 already taken? Set
+`MINDGRAPH_CORE_PORT` in `.env`.) The full API is described in
 [`docs/api/openapi.yaml`](docs/api/openapi.yaml).
+
+### Build a graph in the browser (M5)
+
+Open **http://localhost:3000**, create a graph and click **Graph Builder**:
+
+```text
+1 Data      upload a CSV or JSON file
+2 Analyze   inferred field types, nullability and sample values
+3 AI Model  "Generate Graph Model" (AI) or "Build manually"
+4 Review    entities, relationships and mappings: edit, delete, add
+5 Generate  "Generate Graph": saves the ontology, runs the M4 ingestion
+```
+
+The AI only *suggests*. Nothing is written until you click **Generate
+Graph**, which uses the same endpoints as the curl examples below. Without an
+AI provider the builder says so and the manual path works the same way. See
+[Use the AI Graph Builder (M5)](#use-the-ai-graph-builder-m5) to configure a
+model.
 
 ### Load a dataset without AI (M4)
 
@@ -261,6 +280,61 @@ database. Both backends pass the same contract test suite. Details,
 the physical mapping and current limitations are in
 [`docs/architecture/`](docs/architecture/README.md#graph-storage-adr-004-m2).
 
+## Use the AI Graph Builder (M5)
+
+AI suggests, Rust validates, you review, and the deterministic M4 engine
+executes. Configure one OpenAI-compatible endpoint in `.env`, then
+`docker compose up -d`:
+
+```bash
+# Hosted provider
+MINDGRAPH_LLM_PROVIDER=openai_compatible
+MINDGRAPH_LLM_BASE_URL=https://api.openai.com/v1
+MINDGRAPH_LLM_MODEL=<model name>
+MINDGRAPH_LLM_API_KEY=<your key>
+
+# ...or a local model with Ollama on the host (no key, no data leaves the machine)
+MINDGRAPH_LLM_PROVIDER=openai_compatible
+MINDGRAPH_LLM_BASE_URL=http://host.docker.internal:11434/v1   # Podman: host.containers.internal
+MINDGRAPH_LLM_MODEL=qwen3:8b
+```
+
+Leave `MINDGRAPH_LLM_PROVIDER` empty to disable AI; every manual flow keeps
+working. With the API (continuing the M4 example above, after `customers.csv`
+is analysed):
+
+```bash
+curl -s $API/graph-builder/status | jq .                   # {"status": "ready", ...}
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/graph-builder/suggestions \
+  -H "Idempotency-Key: $(uuidgen)" | jq -r .job_id)
+curl -N $API/jobs/$JOB/events                              # ends with "event: completed"
+curl -s $API/jobs/$JOB | jq '.result.suggestion | {entities: [.ontology.entity_types[].name],
+  modes: [.mapping.entities[] | {alias, mode}], confidence, warnings}'
+
+# Review it, then apply it with the unchanged M4 endpoints:
+curl -s $API/jobs/$JOB | jq .result.suggestion.ontology > ontology.json
+curl -s $API/jobs/$JOB | jq '{mapping: .result.suggestion.mapping}' > mapping.json
+curl -s -X POST $API/graphs/$GRAPH/ontology -H "Content-Type: application/json" -d @ontology.json
+curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" -d @mapping.json
+```
+
+For `accounts.csv` after `Customer` exists, a good suggestion keeps
+`Customer` (marked `existing`), adds `Account` and `Customer ─OWNS→ Account`,
+and maps the customer column with `mode: match_only` so existing customers
+are reused.
+
+**What the model receives** when you request a suggestion: field names,
+inferred types, null counts, up to 5 sample values per field, up to 10
+sample rows, and the graph's current ontology. Never the file, the other
+records, graph contents, paths or credentials. Sample values are treated as
+untrusted data in the prompt; the model has no tools, and every answer is
+validated by Pydantic in the AI service and again, authoritatively, by Rust
+(existing types are never removed or changed). At most one repair attempt is
+made when Rust rejects a suggestion. Details:
+[`docs/architecture/`](docs/architecture/README.md#ai-graph-builder-adr-007-adr-008-m5)
+and [`services/ai/README.md`](services/ai/README.md).
+
 ## Dataset ingestion (M4)
 
 `crates/mindgraph-ingestion` is the deterministic dataset engine (ADR-008),
@@ -306,9 +380,12 @@ Configuration uses environment variables (ADR-013). See
 | `MINDGRAPH_MAX_INGESTION_RECORDS` | core (M4) | `100000`                      |
 | `MINDGRAPH_INGESTION_BATCH_SIZE` | core (M4) | `500` (1–5000)                 |
 | `MINDGRAPH_JOB_CONCURRENCY`   | core (M4) | `2` (1–16)                        |
-| `MINDGRAPH_AI_URL`            | core (M5) | `http://ai:8000`                  |
-| `MINDGRAPH_LLM_PROVIDER`      | ai (M5)   | empty (AI disabled)               |
-| `MINDGRAPH_LLM_API_KEY`       | ai (M5)   | empty                             |
+| `MINDGRAPH_AI_URL`            | core (M5) | `http://ai:8000`; unset disables AI in core |
+| `MINDGRAPH_AI_TIMEOUT_SECONDS` / `_MAX_REPAIR_ATTEMPTS` | core (M5) | `300` / `1` (0–2) |
+| `MINDGRAPH_LLM_PROVIDER`      | ai (M5)   | empty (AI disabled); `openai_compatible` |
+| `MINDGRAPH_LLM_BASE_URL` / `_MODEL` | ai (M5) | empty (required with a provider) |
+| `MINDGRAPH_LLM_API_KEY`       | ai (M5)   | empty (optional; never logged)    |
+| `MINDGRAPH_LLM_TIMEOUT_SECONDS` / `_MAX_OUTPUT_TOKENS` / `_JSON_MODE` | ai (M5) | `60` / `4096` / `true` |
 | `MINDGRAPH_TELEMETRY_ENABLED` | all       | `false`                           |
 
 Telemetry is off by default. MindGraph never collects graph contents,
@@ -324,8 +401,8 @@ the Docker image and in CI.
 | M2        | GraphStore trait, `MemoryGraphStore`, `HugeGraphStore`   | ✅ Done |
 | M3        | PostgreSQL migrations, project and metadata APIs         | ✅ Done |
 | M4        | CSV / JSON ingestion without AI                          | ✅ Done |
-| M5        | AI Graph Builder (ontology suggestion, review, generate) | Next    |
-| M6        | Visual Graph Explorer (Sigma.js, Graphology)             | Planned |
+| M5        | AI Graph Builder (ontology suggestion, review, generate) | ✅ Done |
+| M6        | Visual Graph Explorer (Sigma.js, Graphology)             | Next    |
 | M7        | GraphRAG with evidence graphs                            | Planned |
 | M8        | MCP server for Claude, Codex and Cursor                  | Planned |
 | M9        | Basic entity resolution                                  | Planned |

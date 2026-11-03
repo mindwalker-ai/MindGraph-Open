@@ -6,7 +6,11 @@
 #![allow(clippy::unwrap_used)] // Panicking is the intended failure mode in tests.
 
 use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
-use mindgraph_core::{IngestionJob, JobError, JobStatus, MetadataStore, MetadataStoreError};
+use mindgraph_core::{
+    GraphBuilderResult, GraphBuilderSuggestion, IngestionJob, JobError, JobKind, JobResult,
+    JobStatus, MetadataStore, MetadataStoreError, OntologyDefinition, SuggestionAnnotations,
+    TypeAnnotation,
+};
 use mindgraph_domain::{
     DataSource, DataSourceId, DataSourceKind, DataSourceStatus, EntityType, EntityTypeId, GraphId,
     GraphProject, GraphStatus, IngestionJobId, Ontology, OntologyVersion, PropertiesSchema,
@@ -51,6 +55,8 @@ macro_rules! metadata_store_contract {
             job_progress_is_monotonic_and_bounded,
             idempotency_keys_are_unique_per_graph,
             incomplete_jobs_are_failed_on_recovery,
+            ai_suggest_jobs_round_trip_with_their_result,
+            results_must_match_the_job_kind,
         );
     };
     (@cases $attrs:tt $factory:path; $($case:ident),* $(,)?) => {
@@ -757,10 +763,13 @@ pub async fn job_transitions_are_controlled(store: &dyn MetadataStore) {
         entities_matched: 200,
         relationships_created: 980,
     };
-    let done = store.complete_job(job.id, Some(&summary)).await.unwrap();
+    let done = store
+        .complete_job(job.id, Some(&JobResult::Ingestion(summary)))
+        .await
+        .unwrap();
     assert_eq!(done.status, JobStatus::Completed);
     assert!((done.progress - 1.0).abs() < f64::EPSILON);
-    assert_eq!(done.result, Some(summary));
+    assert_eq!(done.ingestion_summary(), Some(&summary));
     assert_eq!(store.get_job(job.id).await.unwrap(), Some(done));
     let error = JobError::new("X", "late");
     for refused in [
@@ -896,4 +905,111 @@ pub async fn incomplete_jobs_are_failed_on_recovery(store: &dyn MetadataStore) {
         JobStatus::Completed
     );
     assert_eq!(store.mark_incomplete_jobs_failed(&error).await.unwrap(), 0);
+}
+
+fn graph_builder_result() -> GraphBuilderResult {
+    GraphBuilderResult {
+        prompt_version: "graph_builder_v1".into(),
+        provider: "openai_compatible".into(),
+        model: "test-model".into(),
+        ontology_version_base: 1,
+        repair_attempts: 1,
+        suggestion: GraphBuilderSuggestion {
+            ontology: serde_json::from_value::<OntologyDefinition>(json!({
+                "entity_types": [{
+                    "name": "Customer",
+                    "display_name": "Customer",
+                    "properties": [{"name": "customer_id", "type": "string", "required": true}]
+                }],
+                "relationship_types": []
+            }))
+            .unwrap(),
+            mapping: mapping(),
+            confidence: 0.92,
+            annotations: SuggestionAnnotations {
+                entities: vec![TypeAnnotation {
+                    name: "Customer".into(),
+                    confidence: 0.97,
+                    reason: "customer_id identifies each record".into(),
+                    existing: false,
+                }],
+                relationships: vec![],
+            },
+            warnings: vec!["Field city is often empty.".into()],
+        },
+    }
+}
+
+pub async fn ai_suggest_jobs_round_trip_with_their_result(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let job = IngestionJob::graph_builder(
+        graph.id(),
+        source.id(),
+        OntologyVersion::INITIAL,
+        "suggest-1".into(),
+        now(),
+    );
+    store.create_job(&job).await.unwrap();
+    let stored = store.get_job(job.id).await.unwrap().unwrap();
+    assert_eq!(stored, job);
+    assert_eq!(stored.kind, JobKind::AiSuggest);
+    assert_eq!(
+        stored.ontology_version,
+        Some(OntologyVersion::INITIAL),
+        "pinned"
+    );
+    assert!(stored.mapping.is_none());
+    assert_eq!(
+        store
+            .find_job_by_idempotency_key(graph.id(), "suggest-1")
+            .await
+            .unwrap()
+            .map(|found| found.id),
+        Some(job.id)
+    );
+
+    store.start_job(job.id).await.unwrap();
+    let result = JobResult::GraphBuilder(Box::new(graph_builder_result()));
+    let done = store.complete_job(job.id, Some(&result)).await.unwrap();
+    assert_eq!(done.result, Some(result.clone()));
+    let stored = store.get_job(job.id).await.unwrap().unwrap();
+    assert_eq!(stored.graph_builder_result(), Some(&graph_builder_result()));
+
+    // An AI suggestion job needs a pinned version and a key, and no mapping.
+    let mut unpinned = IngestionJob::graph_builder(
+        graph.id(),
+        source.id(),
+        OntologyVersion::INITIAL,
+        "suggest-2".into(),
+        now(),
+    );
+    unpinned.ontology_version = None;
+    assert!(matches!(
+        store.create_job(&unpinned).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+    let mut with_mapping = unpinned.clone();
+    with_mapping.ontology_version = Some(OntologyVersion::INITIAL);
+    with_mapping.mapping = Some(mapping());
+    assert!(matches!(
+        store.create_job(&with_mapping).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+}
+
+pub async fn results_must_match_the_job_kind(store: &dyn MetadataStore) {
+    let (graph, source) = graph_with_source(store).await;
+    let job = ingestion(graph.id(), source.id(), "k");
+    store.create_job(&job).await.unwrap();
+    store.start_job(job.id).await.unwrap();
+    let wrong = JobResult::GraphBuilder(Box::new(graph_builder_result()));
+    assert!(matches!(
+        store.complete_job(job.id, Some(&wrong)).await,
+        Err(MetadataStoreError::InvalidInput(_))
+    ));
+    assert_eq!(
+        store.get_job(job.id).await.unwrap().unwrap().status,
+        JobStatus::Running,
+        "nothing changed"
+    );
 }

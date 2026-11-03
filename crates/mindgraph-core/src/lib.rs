@@ -11,6 +11,7 @@
 //!            mindgraph-core ── MetadataStore (port) ◄── mindgraph-metadata (PostgreSQL)
 //!                  │        ── GraphStore (port)    ◄── HugeGraphStore (mindgraph-graph)
 //!                  │        ── SourceStore (port)   ◄── LocalSourceStore (mindgraph-ingestion)
+//!                  │        ── GraphBuilderAi (port) ◄── HttpGraphBuilderAi (mindgraph-ai-client)
 //!                  ▼
 //!   mindgraph-ingestion (deterministic engine) ─► mindgraph-domain
 //! ```
@@ -20,13 +21,27 @@
 
 #![warn(missing_docs)]
 
+mod ai;
 mod error;
+mod executor;
+mod graph_builder;
 mod graph_projects;
 mod ingestion;
 mod jobs;
 mod memory;
 mod metadata;
 mod ontology;
+
+pub use ai::{
+    AiError, AiMetadata, AiStatus, AiSuggestion, DisabledGraphBuilderAi, GraphBuilderAi,
+    GraphBuilderRequest, GraphBuilderSuggestion, OntologyContext, RepairContext,
+    SuggestionAnnotations, TypeAnnotation,
+};
+pub use graph_builder::{
+    GraphBuilderConfig, GraphBuilderResult, GraphBuilderService, MAX_REPAIR_ATTEMPTS,
+    MAX_SUGGESTED_ENTITY_TYPES, MAX_SUGGESTED_PROPERTIES, MAX_SUGGESTED_RELATIONSHIP_TYPES,
+    MAX_SUGGESTION_TEXT_CHARS, MAX_SUGGESTION_WARNINGS, validate_suggestion,
+};
 
 pub use error::{ApplicationError, BoxError};
 pub use graph_projects::{
@@ -37,7 +52,7 @@ pub use ingestion::{
     DataSourceView, IngestionConfig, IngestionPorts, IngestionService, MAX_BATCH_SIZE,
     MAX_IDEMPOTENCY_KEY_CHARS, PROCESS_RESTARTED, UploadSession,
 };
-pub use jobs::{IngestionJob, JobError, JobKind, JobStatus, MAX_JOB_ERROR_CHARS};
+pub use jobs::{IngestionJob, JobError, JobKind, JobResult, JobStatus, MAX_JOB_ERROR_CHARS};
 pub use memory::MemoryMetadataStore;
 pub use metadata::{DataSourceRecord, LOCAL_WORKSPACE_NAME, MetadataStore, MetadataStoreError};
 pub use ontology::{

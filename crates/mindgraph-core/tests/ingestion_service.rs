@@ -401,7 +401,7 @@ async fn ingestion_builds_the_graph_incrementally() {
     );
     let done = wait(&app, job.id).await;
     assert_eq!(done.status, JobStatus::Completed, "{:?}", done.error);
-    let summary = done.result.unwrap();
+    let summary = done.ingestion_summary().copied().unwrap();
     assert_eq!(
         (summary.records_processed, summary.entities_created),
         (3, 3)
@@ -418,7 +418,11 @@ async fn ingestion_builds_the_graph_incrementally() {
         .start_ingestion(app.graph_id, accounts, "accounts-1", account_mapping())
         .await
         .unwrap();
-    let summary = wait(&app, job.id).await.result.unwrap();
+    let summary = wait(&app, job.id)
+        .await
+        .ingestion_summary()
+        .copied()
+        .unwrap();
     assert_eq!(summary.entities_created, 3, "three accounts");
     assert_eq!(
         summary.entities_matched, 2,
@@ -478,7 +482,11 @@ async fn idempotency_keys_return_the_original_job() {
         .await
         .unwrap();
     assert_ne!(second.id, first.id);
-    let summary = wait(&app, second.id).await.result.unwrap();
+    let summary = wait(&app, second.id)
+        .await
+        .ingestion_summary()
+        .copied()
+        .unwrap();
     assert_eq!((summary.entities_created, summary.entities_matched), (0, 3));
 }
 
@@ -621,7 +629,8 @@ async fn ingestions_of_one_graph_do_not_race() {
         .await
         .unwrap();
     let (a, b) = (wait(&app, first.id).await, wait(&app, second.id).await);
-    let created = a.result.unwrap().entities_created + b.result.unwrap().entities_created;
+    let created = a.ingestion_summary().copied().unwrap().entities_created
+        + b.ingestion_summary().copied().unwrap().entities_created;
     assert_eq!(created, 3, "each customer is created once");
     assert_eq!(count(&app, app.graph_id, "Customer").await, 3);
 }
