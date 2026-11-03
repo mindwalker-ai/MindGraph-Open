@@ -1,0 +1,26 @@
+[package]
+name = "mindgraph-metadata"
+description = "PostgreSQL implementation of the MindGraph Open metadata store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+mindgraph-core.workspace = true
+mindgraph-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

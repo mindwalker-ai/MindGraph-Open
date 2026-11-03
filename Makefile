@@ -9,9 +9,15 @@ AI_DIR := services/ai
 CONTAINER ?= docker
 HUGEGRAPH_IMAGE := docker.io/hugegraph/hugegraph:1.7.0
 HUGEGRAPH_TEST_PORT ?= 18080
+POSTGRES_IMAGE := docker.io/library/postgres:17-alpine
+POSTGRES_TEST_PORT ?= 15432
+# Throwaway test credentials for the local test container only.
+POSTGRES_TEST_URL ?= postgres://mindgraph:mindgraph@127.0.0.1:$(POSTGRES_TEST_PORT)/mindgraph
 
 # Crates mindgraph-domain must never depend on (ADR-002).
 FORBIDDEN_DOMAIN_DEPS := axum|axum-core|hyper|http|reqwest|sqlx|sqlx-core|tokio|tower|tonic
+# Crates mindgraph-core (application layer) must never depend on (ADR-002).
+FORBIDDEN_CORE_DEPS := axum|axum-core|hyper|reqwest|sqlx|sqlx-core|sqlx-postgres|tokio-postgres|tower
 
 .PHONY: help
 help: ## Show available targets
@@ -54,7 +60,7 @@ dev-ai: ## Run the AI service on 127.0.0.1:8000
 
 # --- Quality gates (mirror CI) -----------------------------------------------
 
-.PHONY: check fmt rust-check web-check ai-check check-domain-boundary
+.PHONY: check fmt rust-check web-check ai-check check-domain-boundary check-core-boundary
 check: rust-check web-check ai-check ## Run every CI check locally
 
 fmt: ## Format Rust, TypeScript and Python code
@@ -62,7 +68,7 @@ fmt: ## Format Rust, TypeScript and Python code
 	cd $(WEB_DIR) && npm run format
 	cd $(AI_DIR) && uv run ruff format .
 
-rust-check: check-domain-boundary ## cargo fmt --check, clippy and tests
+rust-check: check-domain-boundary check-core-boundary ## cargo fmt --check, clippy and tests
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked
@@ -81,6 +87,14 @@ check-domain-boundary: ## Fail if mindgraph-domain depends on infrastructure cra
 	fi; \
 	echo "mindgraph-domain dependency boundary OK"
 
+check-core-boundary: ## Fail if mindgraph-core depends on HTTP or database crates
+	@deps=$$(cargo tree -p mindgraph-core -e normal --locked --prefix none --format '{p}' | awk '{print $$1}' | sort -u); \
+	bad=$$(echo "$$deps" | grep -xE '$(FORBIDDEN_CORE_DEPS)' || true); \
+	if [ -n "$$bad" ]; then \
+		echo "mindgraph-core must not depend on: $$bad (ADR-002)"; exit 1; \
+	fi; \
+	echo "mindgraph-core dependency boundary OK"
+
 # --- Live HugeGraph integration tests (opt-in) -------------------------------
 
 .PHONY: hugegraph-test-up hugegraph-test-down test-hugegraph
@@ -97,3 +111,21 @@ hugegraph-test-down: ## Stop the throwaway HugeGraph (its data is discarded)
 test-hugegraph: ## Run the GraphStore contract against a live HugeGraph (see hugegraph-test-up)
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
+
+# --- Live PostgreSQL integration tests (opt-in) ------------------------------
+
+.PHONY: postgres-test-up postgres-test-down test-postgres
+postgres-test-up: ## Start a throwaway PostgreSQL 17 on 127.0.0.1:15432 for live tests
+	$(CONTAINER) run -d --rm --name mindgraph-postgres-test \
+		-e POSTGRES_USER=mindgraph -e POSTGRES_PASSWORD=mindgraph -e POSTGRES_DB=mindgraph \
+		-p 127.0.0.1:$(POSTGRES_TEST_PORT):5432 $(POSTGRES_IMAGE)
+	@echo "Waiting for PostgreSQL..."
+	@until $(CONTAINER) exec mindgraph-postgres-test pg_isready -U mindgraph -d mindgraph >/dev/null 2>&1; do sleep 1; done
+	@echo "PostgreSQL is ready"
+
+postgres-test-down: ## Stop the throwaway PostgreSQL (its data is discarded)
+	$(CONTAINER) rm -f mindgraph-postgres-test
+
+test-postgres: ## Run the metadata store tests against a live PostgreSQL (see postgres-test-up)
+	MINDGRAPH_POSTGRES_TEST_URL=$(POSTGRES_TEST_URL) \
+		cargo test -p mindgraph-metadata --test postgres_integration --locked -- --ignored

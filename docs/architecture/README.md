@@ -8,7 +8,7 @@ source of truth. This page only maps them onto the repository.
 | Process          | Source                          | Notes                             |
 | ---------------- | ------------------------------- | --------------------------------- |
 | `mindgraph-web`  | `apps/web`                      | Next.js, port 3000                |
-| `mindgraph-core` | `crates/mindgraph-api` (binary) | Rust modular monolith, port 8080  |
+| `mindgraph-core` | `crates/mindgraph-api` (binary) | Rust modular monolith, port 8080; composition root |
 | `mindgraph-ai`   | `services/ai`                   | FastAPI, internal only, port 8000 |
 | `mindgraph-mcp`  | `crates/mindgraph-mcp`          | Additional binary (M8)            |
 | `mindgraph`      | `crates/mindgraph-cli`          | Developer CLI                     |
@@ -171,3 +171,43 @@ CI runs the same suite in the `hugegraph-integration` job. Plain
 - Path search does not filter by relationship type. When several different
   shortest paths exist, the backends may pick different ones.
 - HTTPS to HugeGraph is not enabled. It is an internal backend.
+
+## Metadata (ADR-005, M3)
+
+PostgreSQL is the control plane: workspaces, graph projects and immutable
+ontology versions. It never stores entities or relationships.
+
+```text
+HTTP ── mindgraph-api ── GraphProjectService (mindgraph-core)
+                               │ Arc<dyn MetadataStore>   (port, in mindgraph-core)
+                               ▼
+                    PostgresMetadataStore (mindgraph-metadata, SQLx) ── PostgreSQL
+                    MemoryMetadataStore   (mindgraph-core, tests/dev)
+```
+
+- **Startup** (`crates/mindgraph-api/src/main.rs`): read config, connect
+  (fail fast), apply the embedded migrations, ensure the local workspace,
+  serve. No retry loop; Docker's restart policy restarts the process.
+- **Local workspace**: one row with `system_key = 'local'`, created on first
+  start with `INSERT … ON CONFLICT DO NOTHING`, so it is stable across
+  restarts and concurrent starts.
+- **Graph creation** is one transaction: graph row plus ontology v1 row.
+  `graph_projects.active_ontology_version` is `NOT NULL` with a deferred
+  foreign key to `ontology_versions`, so a graph without its ontology cannot
+  exist even at the database level.
+- **Ontology versions** are immutable (a trigger rejects `UPDATE`) and
+  unique per `(graph_id, version)`. The schema is stored as a versioned JSONB
+  document. Decoding rebuilds domain objects through their validated
+  constructors, so bad data is reported as `CorruptData`.
+- **Baseline tables** for M4+: `data_sources`, `ingestion_jobs` (states
+  `queued|running|completed|failed|cancelled`, unique
+  `(graph_id, idempotency_key)`), `saved_views`. They have no application
+  logic yet.
+- Timestamps are stored with microsecond precision. The application
+  truncates to microseconds when it creates records, so API responses before
+  and after a round trip are identical.
+
+The `MetadataStore` contract is enforced by a shared suite
+(`crates/mindgraph-metadata/tests/contract`) that runs against the memory
+store on every `cargo test` and against PostgreSQL 17 with
+`make test-postgres` and in CI. Each PostgreSQL test runs in a fresh database.

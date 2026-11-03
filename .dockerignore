@@ -4,4 +4,6 @@
 !Cargo.toml
 !Cargo.lock
 !crates/
+# Embedded into the binary by sqlx::migrate! at compile time.
+!migrations/
 crates/**/target
