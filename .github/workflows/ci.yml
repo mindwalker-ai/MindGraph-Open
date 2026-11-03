@@ -32,8 +32,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: cargo test
         run: cargo test --workspace --locked
-      - name: Domain crate stays infrastructure-free (ADR-002)
-        run: make check-domain-boundary
+      - name: Domain and core crates stay infrastructure-free (ADR-002)
+        run: make check-domain-boundary check-core-boundary
 
   hugegraph-integration:
     name: HugeGraph 1.7 integration (live)
@@ -54,6 +54,32 @@ jobs:
         run: cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
         env:
           MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
+
+  postgres-integration:
+    name: PostgreSQL 17 integration (live)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: mindgraph
+          POSTGRES_PASSWORD: mindgraph
+          POSTGRES_DB: mindgraph
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mindgraph -d mindgraph"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: MetadataStore contract and PostgreSQL tests (fresh database per test)
+        run: cargo test -p mindgraph-metadata --test postgres_integration --locked -- --ignored
+        env:
+          MINDGRAPH_POSTGRES_TEST_URL: postgres://mindgraph:mindgraph@127.0.0.1:5432/mindgraph
 
   web:
     name: Web (typecheck, lint, format, test)

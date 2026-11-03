@@ -5,7 +5,8 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# SQLx 0.9 requires Rust 1.94.
+rust-version = "1.94"
 # ADR-015: server components are AGPL-3.0 (proposed, pending legal approval).
 # Crates with a different license (e.g. mindgraph-mcp) override this field.
 license = "AGPL-3.0-only"
@@ -16,6 +17,7 @@ publish = false
 # Internal crates
 mindgraph-domain = { path = "crates/mindgraph-domain" }
 mindgraph-core = { path = "crates/mindgraph-core" }
+mindgraph-metadata = { path = "crates/mindgraph-metadata" }
 
 # Domain
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
@@ -29,6 +31,10 @@ uuid = { version = "1.29.0", features = ["v7", "serde"] }
 # Runtime / HTTP (never used by mindgraph-domain)
 async-trait = "0.1.92"
 axum = "0.8.9"
+# Explicit SQL only (ADR-005); no compile-time query macros, so building never
+# needs a database. `macros` is only for `migrate!`, which embeds /migrations.
+# No TLS: PostgreSQL is reached over the internal Docker network (ADR-013).
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 # No TLS: HugeGraph is an internal backend reached over plain HTTP on the
 # Docker network (ADR-013). `gzip` is required because HugeGraph 1.7.0
 # always gzip-compresses list and traverser responses.

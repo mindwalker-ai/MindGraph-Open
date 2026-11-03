@@ -107,6 +107,7 @@ mindgraph/
 │   ├── mindgraph-core/
 │   ├── mindgraph-api/
 │   ├── mindgraph-graph/
+│   ├── mindgraph-metadata/
 │   ├── mindgraph-ingestion/
 │   ├── mindgraph-ontology/
 │   ├── mindgraph-entity-resolution/
@@ -177,6 +178,21 @@ mindgraph-ai
 ```
 
 `mindgraph-mcp` and `mindgraph-cli` are additional Rust binaries using shared crates.
+
+## Refinement (M3, approved)
+
+`crates/mindgraph-metadata/` was added during M3. It is an infrastructure
+crate, not a runtime service:
+
+```text
+mindgraph-core      MetadataStore port and application use cases
+mindgraph-metadata  PostgreSQL implementation (SQLx, persistence codecs,
+                    embedded migrations)
+mindgraph-api       HTTP transport, configuration, composition root
+```
+
+`mindgraph-metadata` depends on `mindgraph-core` (for the port) and
+`mindgraph-domain`. Neither of those depends on SQLx or PostgreSQL.
 
 ## Rejected
 

@@ -40,8 +40,10 @@ services:
       - "127.0.0.1:${MINDGRAPH_CORE_PORT:-8080}:8080"
     environment:
       MINDGRAPH_CORE_BIND_ADDR: 0.0.0.0:8080
-      # Passed through now, used from M2/M3 onward.
+      # Required: core fails fast if PostgreSQL is unreachable and the
+      # restart policy retries. HugeGraph and AI URLs are used from M4/M5.
       MINDGRAPH_DATABASE_URL: postgres://${MINDGRAPH_POSTGRES_USER:-mindgraph}:${MINDGRAPH_POSTGRES_PASSWORD:-mindgraph}@postgres:5432/${MINDGRAPH_POSTGRES_DB:-mindgraph}
+      MINDGRAPH_DATABASE_MAX_CONNECTIONS: ${MINDGRAPH_DATABASE_MAX_CONNECTIONS:-10}
       MINDGRAPH_HUGEGRAPH_URL: http://hugegraph:8080
       MINDGRAPH_AI_URL: http://ai:8000
       MINDGRAPH_TELEMETRY_ENABLED: ${MINDGRAPH_TELEMETRY_ENABLED:-false}

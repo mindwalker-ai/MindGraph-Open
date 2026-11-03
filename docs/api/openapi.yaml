@@ -1,0 +1,253 @@
+openapi: 3.1.0
+info:
+  title: MindGraph Open API
+  version: 0.1.0
+  description: |
+    Public HTTP API of `mindgraph-core` (ADR-006).
+
+    Every response has an `x-request-id` header. A client may send its own
+    (1–128 visible ASCII characters); otherwise one is generated. Every error
+    uses the same envelope, whose `request_id` matches the header.
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+servers:
+  - url: http://localhost:8080
+    description: Local Docker Compose stack
+tags:
+  - name: operations
+  - name: graphs
+paths:
+  /health:
+    get:
+      tags: [operations]
+      operationId: getHealth
+      summary: Liveness check (no database access)
+      responses:
+        "200":
+          description: The process is serving requests.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /ready:
+    get:
+      tags: [operations]
+      operationId: getReadiness
+      summary: Readiness check (PostgreSQL reachable)
+      responses:
+        "200":
+          description: Required infrastructure is reachable.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ready }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs:
+    post:
+      tags: [graphs]
+      operationId: createGraph
+      summary: Create a graph project with an empty ontology v1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateGraphRequest" }
+            example:
+              name: Fraud Investigation
+              description: Transaction investigation graph
+      responses:
+        "201":
+          description: The graph project was created.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+            Location:
+              description: URL of the new graph project.
+              schema: { type: string, example: /api/v1/graphs/0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Graph" }
+        "400": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [graphs]
+      operationId: listGraphs
+      summary: List graph projects, newest first
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Graph projects ordered by `created_at` descending, then id.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GraphList" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    get:
+      tags: [graphs]
+      operationId: getGraph
+      summary: Read a graph project
+      responses:
+        "200":
+          description: The graph project.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Graph" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/ontology:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    get:
+      tags: [graphs]
+      operationId: getActiveOntology
+      summary: Read the active ontology of a graph project (read-only in v0.1)
+      responses:
+        "200":
+          description: The active ontology version.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ontology" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+components:
+  parameters:
+    GraphId:
+      name: graph_id
+      in: path
+      required: true
+      description: A MindGraph graph id (UUIDv7). Anything else is `400 INVALID_GRAPH_ID`.
+      schema: { type: string, format: uuid }
+  headers:
+    RequestId:
+      description: The request id, echoed from the request or generated (UUIDv7).
+      schema: { type: string }
+  responses:
+    Error:
+      description: |
+        Error envelope. Codes: `INVALID_JSON`, `INVALID_QUERY`, `INVALID_REQUEST`,
+        `INVALID_GRAPH_ID` (400), `GRAPH_NOT_FOUND`, `ROUTE_NOT_FOUND` (404),
+        `METHOD_NOT_ALLOWED` (405), `CONFLICT` (409), `UNSUPPORTED_MEDIA_TYPE` (415),
+        `VALIDATION_FAILED` (422), `INTERNAL_ERROR` (500), `SERVICE_UNAVAILABLE`,
+        `NOT_READY` (503).
+      headers:
+        x-request-id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: GRAPH_NOT_FOUND
+              message: Graph was not found
+              request_id: 0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f
+  schemas:
+    Health:
+      type: object
+      required: [status, service, version]
+      properties:
+        status: { type: string, const: ok }
+        service: { type: string, example: mindgraph-core }
+        version: { type: string, example: 0.1.0 }
+    CreateGraphRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Trimmed; 1–120 characters after trimming.
+        description:
+          type: [string, "null"]
+          description: Optional, at most 2,000 characters. Blank text is stored as null.
+    Graph:
+      type: object
+      required: [id, workspace_id, name, description, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        status: { type: string, enum: [draft, active, archived] }
+        created_at: { type: string, format: date-time, description: RFC 3339, UTC, microseconds }
+        updated_at: { type: string, format: date-time }
+    GraphList:
+      type: object
+      required: [data, count]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Graph" }
+        count: { type: integer, minimum: 0 }
+    Property:
+      type: object
+      required: [key, type, required]
+      properties:
+        key: { type: string }
+        type: { type: string, enum: [string, integer, float, boolean, datetime, string_array] }
+        required: { type: boolean }
+    EntityType:
+      type: object
+      required: [id, name, display_name, description, properties]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        display_name: { type: string }
+        description: { type: [string, "null"] }
+        properties:
+          type: array
+          items: { $ref: "#/components/schemas/Property" }
+    RelationshipType:
+      type: object
+      required: [id, name, source_entity_type, target_entity_type, properties]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        source_entity_type: { type: string }
+        target_entity_type: { type: string }
+        properties:
+          type: array
+          items: { $ref: "#/components/schemas/Property" }
+    Ontology:
+      type: object
+      required: [graph_id, version, entity_types, relationship_types]
+      properties:
+        graph_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        entity_types:
+          type: array
+          items: { $ref: "#/components/schemas/EntityType" }
+        relationship_types:
+          type: array
+          items: { $ref: "#/components/schemas/RelationshipType" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }

@@ -10,22 +10,28 @@ publish.workspace = true
 
 # The runtime process is called `mindgraph-core` (ADR-002). The binary lives
 # here, in the outermost layer, so dependencies keep pointing inward:
-# api -> core -> domain.
+# api -> core -> domain. This crate is also the composition root that wires
+# the PostgreSQL adapter (mindgraph-metadata) into the application layer.
 [[bin]]
 name = "mindgraph-core"
 path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
+chrono.workspace = true
 mindgraph-core.workspace = true
+mindgraph-domain.workspace = true
+mindgraph-metadata.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+async-trait.workspace = true
 tower.workspace = true
 
 [lints]

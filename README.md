@@ -13,9 +13,9 @@ Data → Graph → Explore → Ask → Investigate → Connect to AI Agents
 ```
 
 > **Status: pre-alpha.** Milestones **M0** (repository bootstrap), **M1**
-> (domain foundation) and **M2** (graph storage) are complete. Project APIs,
-> ingestion, the graph explorer, GraphRAG and MCP arrive in the next
-> milestones. See the [roadmap](#roadmap).
+> (domain foundation), **M2** (graph storage) and **M3** (project and metadata
+> APIs) are complete. Ingestion, the graph explorer, GraphRAG and MCP arrive in
+> the next milestones. See the [roadmap](#roadmap).
 
 ---
 
@@ -29,7 +29,23 @@ cd MindGraph-Open
 docker compose up --build
 ```
 
-Then open **http://localhost:3000**.
+Then open **http://localhost:3000**, or talk to the API directly:
+
+```bash
+curl http://localhost:8080/health          # liveness
+curl http://localhost:8080/ready           # PostgreSQL reachable?
+
+curl -X POST http://localhost:8080/api/v1/graphs \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Fraud Investigation", "description": "Demo graph"}'
+
+curl http://localhost:8080/api/v1/graphs
+curl http://localhost:8080/api/v1/graphs/<graph_id>/ontology
+```
+
+Graph projects are stored in PostgreSQL and survive restarts. Each new graph
+starts with an empty, active ontology v1. The full API is described in
+[`docs/api/openapi.yaml`](docs/api/openapi.yaml).
 
 | Service     | Role                                 | Address                      |
 | ----------- | ------------------------------------ | ---------------------------- |
@@ -76,9 +92,10 @@ endpoints are listed in [`docs/api/`](docs/api/README.md).
 apps/web/                   Next.js frontend (placeholder until M6)
 crates/
   mindgraph-domain/         Infrastructure-free domain model (M1)
-  mindgraph-core/           Application layer / use cases
+  mindgraph-core/           Application layer: use cases, MetadataStore port
   mindgraph-api/            HTTP API + the `mindgraph-core` server binary
   mindgraph-graph/          GraphStore trait, Memory + HugeGraph adapters (M2)
+  mindgraph-metadata/       PostgreSQL metadata store, SQLx, migrations (M3)
   mindgraph-ingestion/      CSV / JSON ingestion (M4)
   mindgraph-ontology/       Ontology workflows (M3, M5)
   mindgraph-entity-resolution/  Duplicate detection (M9)
@@ -89,7 +106,7 @@ services/ai/                Python AI service (FastAPI, uv)
 docker/                     Dockerfiles for web, core and ai
 docs/                       ADRs, architecture and API docs
 examples/                   Demo datasets (M10)
-migrations/                 PostgreSQL migrations (M3)
+migrations/                 PostgreSQL migrations, applied at startup
 ```
 
 ## Development
@@ -117,15 +134,25 @@ make help      # list all targets
 | `make fmt`                   | Format Rust, TypeScript and Python                            |
 | `make hugegraph-test-up`     | Start a throwaway HugeGraph 1.7 on `127.0.0.1:18080`          |
 | `make test-hugegraph`        | Run the `GraphStore` contract against that live HugeGraph     |
+| `make postgres-test-up`      | Start a throwaway PostgreSQL 17 on `127.0.0.1:15432`          |
+| `make test-postgres`         | Run the metadata store tests against that live PostgreSQL     |
 
 The default test run never needs PostgreSQL, HugeGraph, Python services or
-network access. Live HugeGraph tests are opt-in:
+network access. Live HugeGraph and PostgreSQL tests are opt-in:
 
 ```bash
 make hugegraph-test-up      # add CONTAINER=podman to use Podman
 make test-hugegraph
 make hugegraph-test-down
+
+make postgres-test-up
+make test-postgres
+make postgres-test-down
 ```
+
+Running `mindgraph-core` outside Docker (`make dev-core`) needs
+`MINDGRAPH_DATABASE_URL` pointing at a PostgreSQL 17 database. Migrations run
+automatically at startup; no `sqlx` CLI is needed.
 
 ### Tooling
 
@@ -190,7 +217,8 @@ Configuration uses environment variables (ADR-013). See
 | Variable                      | Used by   | Default (Compose)                 |
 | ----------------------------- | --------- | --------------------------------- |
 | `MINDGRAPH_CORE_BIND_ADDR`    | core      | `0.0.0.0:8080` in the container   |
-| `MINDGRAPH_DATABASE_URL`      | core (M3) | built from `MINDGRAPH_POSTGRES_*` |
+| `MINDGRAPH_DATABASE_URL`      | core      | built from `MINDGRAPH_POSTGRES_*` (required) |
+| `MINDGRAPH_DATABASE_MAX_CONNECTIONS` | core | `10` |
 | `MINDGRAPH_HUGEGRAPH_URL`     | core (M2) | `http://hugegraph:8080`           |
 | `MINDGRAPH_AI_URL`            | core (M5) | `http://ai:8000`                  |
 | `MINDGRAPH_LLM_PROVIDER`      | ai (M5)   | empty (AI disabled)               |
@@ -208,8 +236,8 @@ the Docker image and in CI.
 | M0        | Repository bootstrap: monorepo, Compose, CI              | ✅ Done |
 | M1        | Domain foundation: types, UUIDv7 IDs, validation, errors | ✅ Done |
 | M2        | GraphStore trait, `MemoryGraphStore`, `HugeGraphStore`   | ✅ Done |
-| M3        | PostgreSQL migrations, project and metadata APIs         | Next    |
-| M4        | CSV / JSON ingestion without AI                          | Planned |
+| M3        | PostgreSQL migrations, project and metadata APIs         | ✅ Done |
+| M4        | CSV / JSON ingestion without AI                          | Next    |
 | M5        | AI Graph Builder (ontology suggestion, review, generate) | Planned |
 | M6        | Visual Graph Explorer (Sigma.js, Graphology)             | Planned |
 | M7        | GraphRAG with evidence graphs                            | Planned |
