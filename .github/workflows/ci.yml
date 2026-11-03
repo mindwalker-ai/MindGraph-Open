@@ -35,6 +35,26 @@ jobs:
       - name: Domain crate stays infrastructure-free (ADR-002)
         run: make check-domain-boundary
 
+  hugegraph-integration:
+    name: HugeGraph 1.7 integration (live)
+    runs-on: ubuntu-latest
+    services:
+      hugegraph:
+        image: hugegraph/hugegraph:1.7.0
+        ports:
+          - 18080:8080
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Wait for HugeGraph
+        # The server answers with an error page while it is still starting.
+        run: curl -fsS --retry 60 --retry-all-errors --retry-delay 3 http://127.0.0.1:18080/versions
+      - name: GraphStore contract against HugeGraph
+        run: cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
+        env:
+          MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
+
   web:
     name: Web (typecheck, lint, format, test)
     runs-on: ubuntu-latest

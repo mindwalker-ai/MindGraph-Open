@@ -4,6 +4,12 @@ SHELL := /bin/bash
 WEB_DIR := apps/web
 AI_DIR := services/ai
 
+# Container engine for the throwaway HugeGraph used by live tests
+# (`make hugegraph-test-up CONTAINER=podman` works too).
+CONTAINER ?= docker
+HUGEGRAPH_IMAGE := docker.io/hugegraph/hugegraph:1.7.0
+HUGEGRAPH_TEST_PORT ?= 18080
+
 # Crates mindgraph-domain must never depend on (ADR-002).
 FORBIDDEN_DOMAIN_DEPS := axum|axum-core|hyper|http|reqwest|sqlx|sqlx-core|tokio|tower|tonic
 
@@ -74,3 +80,20 @@ check-domain-boundary: ## Fail if mindgraph-domain depends on infrastructure cra
 		echo "mindgraph-domain must not depend on: $$bad (ADR-002)"; exit 1; \
 	fi; \
 	echo "mindgraph-domain dependency boundary OK"
+
+# --- Live HugeGraph integration tests (opt-in) -------------------------------
+
+.PHONY: hugegraph-test-up hugegraph-test-down test-hugegraph
+hugegraph-test-up: ## Start a throwaway HugeGraph 1.7 on 127.0.0.1:18080 for live tests
+	$(CONTAINER) run -d --rm --name mindgraph-hugegraph-test \
+		-p 127.0.0.1:$(HUGEGRAPH_TEST_PORT):8080 $(HUGEGRAPH_IMAGE)
+	@echo "Waiting for HugeGraph..."
+	@curl -fsS --retry 60 --retry-all-errors --retry-delay 3 \
+		http://127.0.0.1:$(HUGEGRAPH_TEST_PORT)/versions >/dev/null && echo "HugeGraph is ready"
+
+hugegraph-test-down: ## Stop the throwaway HugeGraph (its data is discarded)
+	$(CONTAINER) rm -f mindgraph-hugegraph-test
+
+test-hugegraph: ## Run the GraphStore contract against a live HugeGraph (see hugegraph-test-up)
+	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
+		cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored

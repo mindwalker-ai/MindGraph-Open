@@ -65,3 +65,109 @@ Conventions:
   MindGraph IDs.
 - **Ontology versions** start at `v1`. `Ontology::next_version` creates a new
   immutable version and leaves the previous one unchanged.
+
+## Graph storage (ADR-004, M2)
+
+`crates/mindgraph-graph` owns all graph persistence. Application code only
+ever sees the `GraphStore` trait (`Send + Sync`, usable as
+`Arc<dyn GraphStore>`):
+
+```text
+application (mindgraph-core, M3+)
+        │  Arc<dyn GraphStore>
+        ▼
+   GraphStore ── MemoryGraphStore   reference implementation, tests, dev
+              └─ HugeGraphStore     Apache HugeGraph 1.7 over REST
+        │
+        ▼
+ mindgraph-domain (Entity, Relationship, ids, Properties)
+```
+
+| Operation | Semantics |
+| --------- | --------- |
+| `create_entity` / `create_entities` | Never overwrites. Duplicate → `Conflict`. A batch must be one graph (`InvalidInput`) and is validated as a whole before writing. |
+| `create_relationship` / `create_relationships` | Both endpoints must exist in the relationship's graph (`EntityNotFound` otherwise, including endpoints that only exist in another graph). Duplicate id → `Conflict`. Self-loops allowed. |
+| `get_entity` | `Ok(None)` when missing. |
+| `search_entities` | Optional entity type + exact property filters, ordered by `EntityId`, limit 1–1,000. |
+| `get_neighbors` | `Subgraph` with the entity, the matching relationships (direction, optional type, limit 1–1,000, smallest ids first) and their other endpoints. |
+| `find_path` | Shortest path (fewest hops), `max_depth` 1–6, direction-aware. `None` if no path. Parallel relationships: the smallest `RelationshipId` is used. |
+| `get_subgraph` | Requested entities (≤ 1,000, missing ids ignored) plus the relationships among them. |
+| `delete_entity` | Also removes incident relationships. Returns whether the entity existed. |
+| `clear_graph` | Removes one graph project's data only. Never wipes the database. |
+
+Both backends are checked by one shared contract suite
+(`crates/mindgraph-graph/tests/contract`): `MemoryGraphStore` on every
+`cargo test`, and `HugeGraphStore` against a live server on demand.
+
+### HugeGraph physical mapping
+
+MindGraph uses one generic physical schema for every graph project. User
+ontologies are **not** mirrored into HugeGraph schema objects.
+
+| MindGraph | HugeGraph |
+| --------- | --------- |
+| `Entity` | vertex, label `mindgraph_entity`, id `"{graph_id}:{entity_id}"` (custom string), properties `mg_graph_id`, `mg_type`, `mg_properties` |
+| `Relationship` | edge, label `mindgraph_relationship` (`frequency: MULTIPLE`, sort key `mg_id`), properties `mg_id`, `mg_graph_id`, `mg_type`, `mg_properties` |
+| graph isolation, type lookup | secondary index `mindgraph_entity_by_graph_type` on `[mg_graph_id, mg_type]` |
+| relationship id lookup | secondary index `mindgraph_relationship_by_graph_id` on `[mg_graph_id, mg_id]` |
+
+- The vertex id carries the graph id, so identity is exactly
+  `GraphId + EntityId`. HugeGraph cannot overwrite or connect vertices of
+  different graph projects, even when two graphs use the same `EntityId`.
+- `MULTIPLE` + sort key `mg_id` keeps parallel relationships apart. With the
+  default `SINGLE` frequency, HugeGraph would merge them silently.
+- `HugeGraphStore::ensure_schema` creates the schema idempotently
+  (`check_exist: false`). An incompatible existing definition is reported as
+  `Unsupported`.
+
+### Property encoding
+
+`mg_properties` stores domain properties as typed JSON, because plain JSON
+cannot tell a datetime from a string without an ontology:
+
+```json
+{"version":1,"properties":{"joined_at":{"type":"datetime","value":"2026-11-03T08:30:00Z"},"risk_score":{"type":"float","value":0.91}}}
+```
+
+All six property types round-trip losslessly (floats bit-for-bit, datetimes
+to the nanosecond). Unreadable stored data surfaces as
+`GraphStoreError::CorruptData`, never a panic.
+
+### HugeGraph 1.7.0 specifics
+
+- REST paths are `/graphspaces/{graphspace}/graphs/{graph}/...` (defaults
+  `DEFAULT` / `hugegraph`), not the older `/graphs/{graph}/...`.
+- List and traverser responses are always gzip-compressed.
+- Writing an element with an existing id overwrites it, so the adapter looks
+  ids up before every write.
+- `traversers/edgeexist` returns nothing when `label` is passed for an edge
+  label with sort keys, so the adapter filters the label itself.
+
+### Live integration tests
+
+```bash
+make hugegraph-test-up            # or: make hugegraph-test-up CONTAINER=podman
+make test-hugegraph               # runs the contract suite against 127.0.0.1:18080
+make hugegraph-test-down
+```
+
+CI runs the same suite in the `hugegraph-integration` job. Plain
+`cargo test --workspace` never needs HugeGraph, Docker or network access.
+
+### Known M2 limitations
+
+- Exact property search scans the graph's (or type's) candidates by index
+  and filters `mg_properties` in Rust. Scans are capped at 100,000
+  candidates.
+- Generic physical schema: no per-ontology HugeGraph labels or property
+  indexes.
+- No pagination abstraction, full-text, fuzzy or vector search.
+- No cross-backend transactions. Duplicate detection is check-then-write,
+  so concurrent writers of the same id can race. A batch that fails midway
+  may have written earlier chunks.
+- `clear_graph` deletes vertices one request at a time, and `get_subgraph`
+  reads the edges of each requested entity separately. The REST API offers
+  no batch delete or multi-vertex edge read.
+- Path search does not filter by relationship type. When several different
+  shortest paths exist, the backends may pick different ones.
+- HTTPS to HugeGraph is not enabled. It is an internal backend.
