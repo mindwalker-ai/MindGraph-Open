@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use mindgraph_ai_client::{DEFAULT_SUGGEST_TIMEOUT, HttpGraphBuilderAi};
 use mindgraph_core::{
-    AiError, AiStatus, GraphBuilderAi, GraphBuilderRequest, OntologyContext, OntologyDefinition,
+    AiError, AiStatus, DatasetContext, GraphBuilderAi, GraphBuilderRequest, OntologyContext,
+    OntologyDefinition,
 };
 use mindgraph_ingestion::DatasetProfile;
 use serde_json::{Value, json};
@@ -16,13 +17,16 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn request() -> GraphBuilderRequest {
     GraphBuilderRequest {
         correlation_id: "019a0000-0000-7000-8000-000000000001".into(),
-        dataset_profile: serde_json::from_value::<DatasetProfile>(json!({
-            "record_count": 2,
-            "fields": [{"name": "customer_id", "inferred_type": "string", "nullable": false,
-                        "non_null_count": 2, "sample_values": ["C001", "C002"]}],
-            "sample_rows": [{"customer_id": "C001"}]
-        }))
-        .unwrap(),
+        datasets: vec![DatasetContext {
+            name: "customers.csv".into(),
+            profile: serde_json::from_value::<DatasetProfile>(json!({
+                "record_count": 2,
+                "fields": [{"name": "customer_id", "inferred_type": "string", "nullable": false,
+                            "non_null_count": 2, "sample_values": ["C001", "C002"]}],
+                "sample_rows": [{"customer_id": "C001"}]
+            }))
+            .unwrap(),
+        }],
         active_ontology: OntologyContext {
             version: 1,
             definition: OntologyDefinition::default(),
@@ -36,10 +40,11 @@ fn suggestion() -> Value {
         "ontology": {"entity_types": [{"name": "Customer", "properties": [
             {"name": "customer_id", "type": "string", "required": true}]}],
             "relationship_types": []},
-        "mapping": {"entities": [{"alias": "customer", "entity_type": "Customer",
+        "mappings": [{"dataset": "customers.csv", "mapping": {"entities": [{"alias": "customer",
+            "entity_type": "Customer",
             "identity": [{"source_field": "customer_id", "property": "customer_id"}],
             "properties": [{"source_field": "customer_id", "property": "customer_id"}]}],
-            "relationships": []},
+            "relationships": []}}],
         "confidence": 0.9,
         "annotations": {"entities": [{"name": "Customer", "confidence": 0.95, "reason": "id"}],
             "relationships": []},
@@ -74,7 +79,7 @@ async fn successful_suggestions_are_decoded_and_correlated() {
             "019a0000-0000-7000-8000-000000000001",
         ))
         .and(body_partial_json(json!({
-            "dataset_profile": {"record_count": 2},
+            "datasets": [{"name": "customers.csv", "profile": {"record_count": 2}}],
             "active_ontology": {"version": 1, "entity_types": []}
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
@@ -85,7 +90,12 @@ async fn successful_suggestions_are_decoded_and_correlated() {
     assert_eq!(result.metadata.prompt_version, "graph_builder_v1");
     assert_eq!(result.metadata.model, "test-model");
     assert_eq!(result.suggestion.ontology.entity_types[0].name, "Customer");
-    assert_eq!(result.suggestion.mapping.entities[0].alias, "customer");
+    assert_eq!(result.suggestion.mappings[0].dataset, "customers.csv");
+    assert_eq!(result.suggestion.mappings[0].data_source_id, None);
+    assert_eq!(
+        result.suggestion.mappings[0].mapping.entities[0].alias,
+        "customer"
+    );
 }
 
 #[tokio::test]
@@ -105,7 +115,7 @@ async fn requests_contain_only_the_profile_and_the_ontology() {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["active_ontology", "dataset_profile"]);
+    assert_eq!(keys, ["active_ontology", "datasets"]);
 }
 
 #[tokio::test]
@@ -182,7 +192,7 @@ async fn invalid_bodies_are_invalid_responses() {
     missing_mapping["suggestion"]
         .as_object_mut()
         .unwrap()
-        .remove("mapping");
+        .remove("mappings");
     let mut extra_field = ok_body();
     extra_field["suggestion"]["chain_of_thought"] = json!("...");
     for body in [

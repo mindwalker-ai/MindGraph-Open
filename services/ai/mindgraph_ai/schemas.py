@@ -25,6 +25,10 @@ MAX_ENTITY_TYPES = 25
 MAX_RELATIONSHIP_TYPES = 50
 MAX_PROPERTIES = 100
 MAX_WARNINGS = 20
+#: Datasets modelled together in one request (MindGraph Core's bound).
+MAX_DATASETS = 10
+
+DatasetName = Annotated[str, StringConstraints(min_length=1, max_length=300)]
 
 
 class Strict(BaseModel):
@@ -107,9 +111,16 @@ class Annotations(Strict):
     )
 
 
+class DatasetMappingDraft(Strict):
+    """The M4 mapping of one dataset, named as in the request."""
+
+    dataset: DatasetName
+    mapping: MappingDraft
+
+
 class GraphBuilderSuggestion(Strict):
     ontology: OntologyDraft
-    mapping: MappingDraft
+    mappings: list[DatasetMappingDraft] = Field(min_length=1, max_length=MAX_DATASETS)
     confidence: Confidence
     annotations: Annotations = Field(default_factory=Annotations)
     warnings: list[ShortText] = Field(default_factory=list, max_length=MAX_WARNINGS)
@@ -172,8 +183,15 @@ class RepairContext(Strict):
     )
 
 
+class DatasetInput(Strict):
+    """One analysed dataset: a label unique in the request and its profile."""
+
+    name: DatasetName
+    profile: DatasetProfile
+
+
 class SuggestRequest(Strict):
-    dataset_profile: DatasetProfile
+    datasets: list[DatasetInput] = Field(min_length=1, max_length=MAX_DATASETS)
     active_ontology: ActiveOntology
     repair: RepairContext | None = None
 

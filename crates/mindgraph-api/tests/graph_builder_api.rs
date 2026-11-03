@@ -36,8 +36,22 @@ impl GraphBuilderAi for FakeAi {
         self.status.clone()
     }
 
-    async fn suggest(&self, _: &GraphBuilderRequest) -> Result<AiSuggestion, AiError> {
+    async fn suggest(&self, request: &GraphBuilderRequest) -> Result<AiSuggestion, AiError> {
         *self.calls.lock().unwrap() += 1;
+        // The same customer mapping for every dataset of the request.
+        let mappings: Vec<Value> = request
+            .datasets
+            .iter()
+            .map(|dataset| {
+                json!({"dataset": dataset.name, "mapping": {"entities": [{"alias": "customer",
+                    "entity_type": "Customer", "mode": "create_or_match",
+                    "identity": [{"source_field": "customer_id", "property": "customer_id"}],
+                    "properties": [
+                        {"source_field": "customer_id", "property": "customer_id"},
+                        {"source_field": "name", "property": "name"}]}],
+                    "relationships": []}})
+            })
+            .collect();
         Ok(AiSuggestion {
             suggestion: serde_json::from_value(json!({
                 "ontology": {"entity_types": [{"name": "Customer", "display_name": "Customer",
@@ -45,13 +59,7 @@ impl GraphBuilderAi for FakeAi {
                         {"name": "customer_id", "type": "string", "required": true},
                         {"name": "name", "type": "string", "required": false}]}],
                     "relationship_types": []},
-                "mapping": {"entities": [{"alias": "customer", "entity_type": "Customer",
-                    "mode": "create_or_match",
-                    "identity": [{"source_field": "customer_id", "property": "customer_id"}],
-                    "properties": [
-                        {"source_field": "customer_id", "property": "customer_id"},
-                        {"source_field": "name", "property": "name"}]}],
-                    "relationships": []},
+                "mappings": mappings,
                 "confidence": 0.92,
                 "annotations": {"entities": [{"name": "Customer", "confidence": 0.97,
                     "reason": "customer_id identifies each record"}], "relationships": []},
@@ -243,10 +251,11 @@ async fn suggestions_are_accepted_and_returned_through_the_job_api() {
         suggestion["ontology"]["entity_types"][0]["name"],
         "Customer"
     );
-    assert_eq!(
-        suggestion["mapping"]["entities"][0]["mode"],
-        "create_or_match"
-    );
+    assert_eq!(job["data_source_ids"], json!([source]));
+    let mapping = &suggestion["mappings"][0];
+    assert_eq!(mapping["dataset"], "customers.csv");
+    assert_eq!(mapping["data_source_id"], source.as_str());
+    assert_eq!(mapping["mapping"]["entities"][0]["mode"], "create_or_match");
     assert_eq!(suggestion["annotations"]["entities"][0]["existing"], false);
 
     // The reviewed suggestion is applied with the unchanged M4 endpoints.
@@ -261,7 +270,7 @@ async fn suggestions_are_accepted_and_returned_through_the_job_api() {
     .header(header::CONTENT_TYPE, "application/json")
     .header("idempotency-key", "ingest-1")
     .body(Body::from(
-        json!({"mapping": suggestion["mapping"]}).to_string(),
+        json!({"mapping": mapping["mapping"]}).to_string(),
     ))
     .unwrap();
     let ingestion = send(&app, ingestion).await;
@@ -357,5 +366,92 @@ async fn status_reports_provider_and_model_but_no_urls() {
         reply.body,
         json!({"status": "ready", "configured": true,
                "provider": "openai_compatible", "model": "test-model"})
+    );
+}
+
+async fn post_body(app: &TestApp, uri: &str, key: Option<&str>, body: &Value) -> Reply {
+    let mut request = Request::post(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-request-id", "client-request-1");
+    if let Some(key) = key {
+        request = request.header("idempotency-key", key);
+    }
+    send(app, request.body(Body::from(body.to_string())).unwrap()).await
+}
+
+#[tokio::test]
+async fn one_suggestion_can_model_several_data_sources() {
+    let app = app(ready()).await;
+    let graph = create_graph(&app).await;
+    let first = analysed(&app, &graph).await;
+    let second = analysed(&app, &graph).await;
+    let uri = format!("/api/v1/graphs/{graph}/graph-builder/suggestions");
+
+    let body = json!({"data_source_ids": [second, first]});
+    let accepted = post_body(&app, &uri, Some("both"), &body).await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{}", accepted.body);
+    let job = wait(&app, accepted.body["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "completed", "{job}");
+    assert_eq!(job["data_source_id"], second.as_str());
+    assert_eq!(job["data_source_ids"], json!([second, first]));
+    let mappings = job["result"]["suggestion"]["mappings"].as_array().unwrap();
+    let linked: Vec<(&str, &str)> = mappings
+        .iter()
+        .map(|m| {
+            (
+                m["dataset"].as_str().unwrap(),
+                m["data_source_id"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Same filename twice: distinct labels; no dependencies: client order.
+    assert_eq!(
+        linked,
+        [
+            ("customers.csv", second.as_str()),
+            ("customers.csv (2)", first.as_str())
+        ]
+    );
+
+    let again = post_body(&app, &uri, Some("both"), &body).await;
+    assert_eq!(again.body["job_id"], accepted.body["job_id"]);
+    let reordered = json!({"data_source_ids": [first, second]});
+    assert_error(
+        &post_body(&app, &uri, Some("both"), &reordered).await,
+        StatusCode::CONFLICT,
+        "CONFLICT",
+    );
+    for (bad, status, code) in [
+        (
+            json!({"data_source_ids": []}),
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+        ),
+        (
+            json!({"data_source_ids": [first, first]}),
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+        ),
+        (
+            json!({"data_source_ids": ["nope"]}),
+            StatusCode::BAD_REQUEST,
+            "INVALID_DATA_SOURCE_ID",
+        ),
+        (
+            json!({"sources": [first]}),
+            StatusCode::BAD_REQUEST,
+            "INVALID_JSON",
+        ),
+    ] {
+        assert_error(
+            &post_body(&app, &uri, Some("other"), &bad).await,
+            status,
+            code,
+        );
+    }
+    assert_error(
+        &post_body(&app, &uri, None, &body).await,
+        StatusCode::BAD_REQUEST,
+        "MISSING_IDEMPOTENCY_KEY",
     );
 }

@@ -3,17 +3,30 @@ import { Suspense } from "react";
 
 import { GraphBuilder } from "@/components/builder/GraphBuilder";
 
-export const metadata: Metadata = { title: "Graph Builder · MindGraph" };
+export const metadata: Metadata = { title: "AI Graph Builder · MindGraph" };
 
-async function Builder({ params }: { params: Promise<{ graphId: string }> }) {
+function sourceList(raw: string | string[] | undefined): string[] {
+  const value = Array.isArray(raw) ? raw.join(",") : (raw ?? "");
+  return value.split(",").filter(Boolean);
+}
+
+async function Builder({ params, searchParams }: PageProps<"/graphs/[graphId]/builder">) {
   const { graphId } = await params;
-  return <GraphBuilder graphId={graphId} />;
+  const { sources } = await searchParams;
+  const sourceIds = sourceList(sources);
+  return (
+    <GraphBuilder
+      key={`${graphId}:${sourceIds.join(",")}`}
+      graphId={graphId}
+      sourceIds={sourceIds}
+    />
+  );
 }
 
 export default function BuilderPage(props: PageProps<"/graphs/[graphId]/builder">) {
   return (
-    <Suspense fallback={<p className="px-6 py-8 text-sm text-muted">Loading Graph Builder…</p>}>
-      <Builder params={props.params} />
+    <Suspense fallback={<div className="h-screen bg-bg" aria-busy />}>
+      <Builder {...props} />
     </Suspense>
   );
 }
