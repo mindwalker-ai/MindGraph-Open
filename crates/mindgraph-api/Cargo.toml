@@ -1,0 +1,32 @@
+[package]
+name = "mindgraph-api"
+description = "HTTP API of MindGraph Open and the `mindgraph-core` server binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The runtime process is called `mindgraph-core` (ADR-002). The binary lives
+# here, in the outermost layer, so dependencies keep pointing inward:
+# api -> core -> domain.
+[[bin]]
+name = "mindgraph-core"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+mindgraph-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

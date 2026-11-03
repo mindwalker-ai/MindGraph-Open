@@ -1,0 +1,30 @@
+# Rust
+/target/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# Internal product documents are kept out of the public repository.
+docs/*PRD*.md
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+*.swp

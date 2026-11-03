@@ -1,0 +1,3 @@
+# `unwrap_used` is denied in library code (see workspace lints) but is idiomatic in tests.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
