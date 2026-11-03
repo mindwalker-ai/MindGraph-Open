@@ -43,6 +43,19 @@ pub const MAX_SUGGESTION_WARNINGS: usize = 20;
 pub const MAX_SUGGESTION_TEXT_CHARS: usize = 300;
 /// Largest accepted `max_repair_attempts`.
 pub const MAX_REPAIR_ATTEMPTS: u32 = 2;
+/// Default number of AI jobs running at the same time.
+pub const DEFAULT_AI_JOB_CONCURRENCY: usize = 2;
+/// Largest accepted `job_concurrency`.
+pub const MAX_AI_JOB_CONCURRENCY: usize = 8;
+/// AI jobs waiting for a worker; more are rejected as unavailable.
+const AI_QUEUE_CAPACITY: usize = 64;
+/// Repair errors sent back to the AI service, and the characters kept per
+/// error: the bounds of its `RepairContext` schema.
+const MAX_REPAIR_ERRORS: usize = 50;
+const MAX_REPAIR_ERROR_CHARS: usize = 500;
+/// Largest serialised job result. PostgreSQL bounds `result_json` to
+/// 512 KiB of its own text form, which adds whitespace, so stay well below.
+const MAX_RESULT_BYTES: usize = 384 * 1024;
 /// Sample rows of the profile sent to the AI (the profile keeps up to 20).
 const AI_SAMPLE_ROWS: usize = 10;
 /// Upper bound of the serialised profile sent to the AI.
@@ -55,12 +68,16 @@ const REPORTED_ERRORS: usize = 5;
 pub struct GraphBuilderConfig {
     /// Repair attempts after Rust rejects a suggestion (`0..=2`).
     pub max_repair_attempts: u32,
+    /// AI jobs running at the same time (`1..=8`). AI jobs have their own
+    /// workers, so slow model calls never delay analysis or ingestion.
+    pub job_concurrency: usize,
 }
 
 impl Default for GraphBuilderConfig {
     fn default() -> Self {
         Self {
             max_repair_attempts: 1,
+            job_concurrency: DEFAULT_AI_JOB_CONCURRENCY,
         }
     }
 }
@@ -101,13 +118,16 @@ impl std::fmt::Debug for GraphBuilderService {
 }
 
 impl GraphBuilderService {
-    /// Registers the `ai_suggest` worker on the shared job executor of
-    /// `ingestion` and returns the service.
+    /// Starts the `ai_suggest` workers and returns the service. They have
+    /// their own queue and concurrency limit, separate from analysis and
+    /// ingestion jobs, but the same job store. Must be called inside a Tokio
+    /// runtime.
     ///
     /// # Errors
     ///
     /// [`ApplicationError::InvalidRequest`] for more than
-    /// [`MAX_REPAIR_ATTEMPTS`] repair attempts.
+    /// [`MAX_REPAIR_ATTEMPTS`] repair attempts or a job concurrency outside
+    /// `1..=MAX_AI_JOB_CONCURRENCY`.
     pub fn new(
         ai: Arc<dyn GraphBuilderAi>,
         ingestion: &IngestionService,
@@ -118,7 +138,16 @@ impl GraphBuilderService {
                 "at most {MAX_REPAIR_ATTEMPTS} repair attempts are allowed"
             )));
         }
-        let executor = ingestion.executor().clone();
+        if !(1..=MAX_AI_JOB_CONCURRENCY).contains(&config.job_concurrency) {
+            return Err(ApplicationError::InvalidRequest(format!(
+                "the AI job concurrency must be between 1 and {MAX_AI_JOB_CONCURRENCY}"
+            )));
+        }
+        let executor = JobExecutor::start(
+            Arc::clone(ingestion.metadata()),
+            config.job_concurrency,
+            AI_QUEUE_CAPACITY,
+        );
         executor.register(
             JobKind::AiSuggest,
             Arc::new(SuggestionWorker {
@@ -431,6 +460,28 @@ fn check_preserves_base(base: &Ontology, candidate: &Ontology, errors: &mut Vec<
     }
 }
 
+/// The validation errors as the AI service accepts them in a repair
+/// request: at most [`MAX_REPAIR_ERRORS`] errors of at most
+/// [`MAX_REPAIR_ERROR_CHARS`] characters, the last one counting the rest.
+fn repair_errors(errors: Vec<String>) -> Vec<String> {
+    let clip = |text: &str| -> String { text.chars().take(MAX_REPAIR_ERROR_CHARS).collect() };
+    if errors.len() <= MAX_REPAIR_ERRORS {
+        return errors.iter().map(|error| clip(error)).collect();
+    }
+    let kept = MAX_REPAIR_ERRORS - 1;
+    let mut bounded: Vec<String> = errors[..kept].iter().map(|error| clip(error)).collect();
+    bounded.push(format!(
+        "and {} more problems of the same kinds",
+        errors.len() - kept
+    ));
+    bounded
+}
+
+/// Whether the result fits the job store's result bound.
+fn result_fits(result: &GraphBuilderResult) -> bool {
+    serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() <= MAX_RESULT_BYTES)
+}
+
 fn ai_failure(error: &AiError) -> JobError {
     JobError::new(error.code(), error.to_string())
 }
@@ -526,16 +577,21 @@ impl JobHandler for SuggestionWorker {
                             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         "AI suggestion validated"
                     );
-                    return Ok(Some(JobResult::GraphBuilder(Box::new(
-                        GraphBuilderResult {
-                            prompt_version: response.metadata.prompt_version,
-                            provider: response.metadata.provider,
-                            model: response.metadata.model,
-                            ontology_version_base: version.get(),
-                            repair_attempts,
-                            suggestion,
-                        },
-                    ))));
+                    let result = GraphBuilderResult {
+                        prompt_version: response.metadata.prompt_version,
+                        provider: response.metadata.provider,
+                        model: response.metadata.model,
+                        ontology_version_base: version.get(),
+                        repair_attempts,
+                        suggestion,
+                    };
+                    if !result_fits(&result) {
+                        return Err(JobError::new(
+                            "AI_RESULT_TOO_LARGE",
+                            "the AI suggestion is too large to store; try a dataset with fewer fields",
+                        ));
+                    }
+                    return Ok(Some(JobResult::GraphBuilder(Box::new(result))));
                 }
                 Err(errors) if repair_attempts < self.config.max_repair_attempts => {
                     repair_attempts += 1;
@@ -549,7 +605,7 @@ impl JobHandler for SuggestionWorker {
                     self.progress(job, 0.5).await;
                     request.repair = Some(RepairContext {
                         previous: response.suggestion,
-                        errors,
+                        errors: repair_errors(errors),
                     });
                 }
                 Err(errors) => {
@@ -589,6 +645,21 @@ mod tests {
         assert!(sent.sample_rows.len() <= AI_SAMPLE_ROWS);
         assert!(serde_json::to_vec(&sent).unwrap().len() <= MAX_AI_PROFILE_BYTES);
         assert_eq!(sent.record_count, 30);
+    }
+
+    #[test]
+    fn repair_errors_fit_the_ai_service_schema() {
+        let few = vec!["a".repeat(600), "b".to_owned()];
+        let sent = repair_errors(few);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].chars().count(), MAX_REPAIR_ERROR_CHARS);
+        assert_eq!(sent[1], "b");
+
+        let many: Vec<String> = (0..120).map(|i| format!("error {i}")).collect();
+        let sent = repair_errors(many);
+        assert_eq!(sent.len(), MAX_REPAIR_ERRORS);
+        assert_eq!(sent[48], "error 48");
+        assert_eq!(sent[49], "and 71 more problems of the same kinds");
     }
 
     #[test]

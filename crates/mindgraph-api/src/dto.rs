@@ -9,7 +9,8 @@ use mindgraph_core::{
     OntologyDefinition, PropertyInput, RelationshipTypeInput,
 };
 use mindgraph_domain::{
-    EntityType, GraphProject, Ontology, PropertiesSchema, PropertyType, RelationshipType,
+    EntityType, GraphProject, Ontology, OntologyVersion, PropertiesSchema, PropertyType,
+    RelationshipType,
 };
 use mindgraph_ingestion::{DatasetProfile, IngestionMapping, IngestionSummary};
 use serde::{Deserialize, Serialize};
@@ -206,6 +207,10 @@ pub(crate) struct RelationshipTypeRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateOntologyRequest {
+    /// Optional precondition: the active version the definition was based
+    /// on. A different active version is a conflict.
+    #[serde(default)]
+    pub(crate) expected_version: Option<OntologyVersion>,
     entity_types: Vec<EntityTypeRequest>,
     #[serde(default)]
     relationship_types: Vec<RelationshipTypeRequest>,

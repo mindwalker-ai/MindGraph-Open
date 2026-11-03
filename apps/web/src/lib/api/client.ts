@@ -36,7 +36,13 @@ export interface ApiClient {
   createGraph(name: string, description?: string): Promise<GraphProject>;
   getGraph(graphId: string): Promise<GraphProject>;
   getOntology(graphId: string): Promise<Ontology>;
-  createOntology(graphId: string, draft: OntologyDraft): Promise<Ontology>;
+  /** Creates the next version. With `expectedVersion`, the server rejects
+   * the write (409 CONFLICT) if another version became active meanwhile. */
+  createOntology(
+    graphId: string,
+    draft: OntologyDraft,
+    expectedVersion?: number,
+  ): Promise<Ontology>;
   uploadDataSource(graphId: string, file: File): Promise<DataSource>;
   getDataSource(graphId: string, dataSourceId: string): Promise<DataSource>;
   analyze(graphId: string, dataSourceId: string): Promise<JobAccepted>;
@@ -57,9 +63,19 @@ export interface ApiClient {
 
 type Fetch = typeof fetch;
 
+function parse(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 async function decode<T>(response: Response): Promise<T> {
   const text = await response.text();
-  const body: unknown = text ? JSON.parse(text) : null;
+  // A proxy or an HTML error page may answer with something that is not JSON.
+  const body = parse(text);
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string; request_id?: string } })
       ?.error;
@@ -68,6 +84,13 @@ async function decode<T>(response: Response): Promise<T> {
       error?.code ?? "HTTP_ERROR",
       error?.message ?? `Request failed with HTTP ${response.status}`,
       error?.request_id,
+    );
+  }
+  if (body === undefined) {
+    throw new ApiError(
+      response.status,
+      "INVALID_RESPONSE",
+      "The server sent an unreadable response",
     );
   }
   return body as T;
@@ -93,7 +116,14 @@ export function createApiClient(
       call("/graphs", json("POST", { name, description: description || undefined })),
     getGraph: (graphId) => call(`/graphs/${graphId}`),
     getOntology: (graphId) => call(`/graphs/${graphId}/ontology`),
-    createOntology: (graphId, draft) => call(`/graphs/${graphId}/ontology`, json("POST", draft)),
+    createOntology: (graphId, draft, expectedVersion) =>
+      call(
+        `/graphs/${graphId}/ontology`,
+        json(
+          "POST",
+          expectedVersion === undefined ? draft : { ...draft, expected_version: expectedVersion },
+        ),
+      ),
     uploadDataSource: (graphId, file) => {
       const form = new FormData();
       form.append("file", file, file.name);

@@ -11,8 +11,9 @@
 use std::sync::Arc;
 
 use mindgraph_domain::{
-    EntityType, EntityTypeId, GraphId, Ontology, PropertiesSchema, PropertyDefinition, PropertyKey,
-    PropertyType, RelationshipType, RelationshipTypeId, TypeName, WorkspaceId,
+    EntityType, EntityTypeId, GraphId, Ontology, OntologyVersion, PropertiesSchema,
+    PropertyDefinition, PropertyKey, PropertyType, RelationshipType, RelationshipTypeId, TypeName,
+    WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -224,6 +225,26 @@ impl OntologyService {
         graph_id: GraphId,
         definition: &OntologyDefinition,
     ) -> Result<Ontology, ApplicationError> {
+        self.create_version_expecting(graph_id, definition, None)
+            .await
+    }
+
+    /// Like [`Self::create_version`], but only if the active version is
+    /// still `expected_version`. The definition is the complete next
+    /// ontology, so a client that read version N must not replace a version
+    /// N+1 created in the meantime. The check is atomic: the new version is
+    /// numbered `expected + 1`, and that number is unique per graph.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create_version`], and [`ApplicationError::Conflict`] when
+    /// the active version is not `expected_version`.
+    pub async fn create_version_expecting(
+        &self,
+        graph_id: GraphId,
+        definition: &OntologyDefinition,
+        expected_version: Option<OntologyVersion>,
+    ) -> Result<Ontology, ApplicationError> {
         self.metadata
             .get_graph(graph_id)
             .await?
@@ -238,6 +259,14 @@ impl OntologyService {
                     "graph {graph_id} has no active ontology"
                 )))
             })?;
+        if let Some(expected) = expected_version
+            && expected != active.version()
+        {
+            return Err(ApplicationError::Conflict(format!(
+                "the active ontology is version {}, not {expected}; read it again and retry",
+                active.version()
+            )));
+        }
         let ontology = definition.build_next_version(&active)?;
         self.metadata
             .create_and_activate_ontology(&ontology)
@@ -361,6 +390,34 @@ mod tests {
                 .entity_types()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn an_expected_version_rejects_stale_definitions() {
+        let (service, graphs, graph_id) = setup().await;
+        let v2 = service
+            .create_version_expecting(graph_id, &fraud(), Some(OntologyVersion::INITIAL))
+            .await
+            .unwrap();
+        assert_eq!(v2.version(), OntologyVersion::new(2).unwrap());
+
+        // A client that still holds version 1 would drop what version 2 added.
+        let err = service
+            .create_version_expecting(
+                graph_id,
+                &OntologyDefinition::default(),
+                Some(OntologyVersion::INITIAL),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApplicationError::Conflict(_)), "{err}");
+        assert_eq!(graphs.get_active_ontology(graph_id).await.unwrap(), v2);
+
+        let v3 = service
+            .create_version_expecting(graph_id, &fraud(), Some(v2.version()))
+            .await
+            .unwrap();
+        assert_eq!(v3.version(), OntologyVersion::new(3).unwrap());
     }
 
     #[tokio::test]

@@ -400,6 +400,34 @@ async fn ontology_creation_returns_the_new_active_version() {
 }
 
 #[tokio::test]
+async fn ontology_creation_enforces_an_expected_version() {
+    let app = app().await;
+    let graph = create_graph(&app).await;
+    let uri = format!("/api/v1/graphs/{graph}/ontology");
+    let mut based_on_v1 = customer_ontology();
+    based_on_v1["expected_version"] = json!(1);
+    let reply = post_json(&app, &uri, &based_on_v1, None).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text);
+    assert_eq!(reply.body["version"], 2);
+
+    // Stale: version 2 is active now, nothing is written.
+    let mut stale = json!({"entity_types": [], "expected_version": 1});
+    assert_error(
+        &post_json(&app, &uri, &stale, None).await,
+        StatusCode::CONFLICT,
+        "CONFLICT",
+    );
+    assert_eq!(get(&app, &uri).await.body["version"], 2);
+
+    stale["expected_version"] = json!(0);
+    assert_error(
+        &post_json(&app, &uri, &stale, None).await,
+        StatusCode::BAD_REQUEST,
+        "INVALID_JSON",
+    );
+}
+
+#[tokio::test]
 async fn ingestion_writes_the_graph_and_is_idempotent() {
     let app = app().await;
     let graph = create_graph(&app).await;

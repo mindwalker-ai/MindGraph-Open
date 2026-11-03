@@ -165,5 +165,17 @@ def test_repair_requests_are_accepted() -> None:
     assert "validation_errors" in provider.requests[0].user_prompt
 
 
+def test_active_ontologies_may_exceed_suggestion_bounds() -> None:
+    client, _ = app_with(customers_suggestion())
+    wide = {
+        "name": "Customer",
+        "properties": [{"name": f"attr_{i}", "type": "string"} for i in range(150)],
+    }
+    body = suggest_request(
+        active_ontology={"version": 2, "entity_types": [wide], "relationship_types": []}
+    )
+    assert client.post(SUGGEST, json=body).status_code == 200
+
+
 def test_unknown_internal_routes_do_not_exist(client: TestClient) -> None:
     assert client.post("/internal/v1/ontology/suggest", json={}).status_code == 404

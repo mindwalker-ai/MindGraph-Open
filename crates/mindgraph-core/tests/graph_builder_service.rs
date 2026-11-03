@@ -623,6 +623,7 @@ async fn zero_repair_attempts_fail_immediately() {
         FakeAi::ready(),
         GraphBuilderConfig {
             max_repair_attempts: 0,
+            ..GraphBuilderConfig::default()
         },
     )
     .await;
@@ -761,6 +762,41 @@ async fn suggestions_keep_their_pinned_ontology_version() {
 }
 
 #[tokio::test]
+async fn slow_ai_jobs_do_not_hold_up_dataset_jobs() {
+    let gate = Arc::new(Semaphore::new(0));
+    let app = app_with(
+        FakeAi {
+            gate: Some(gate.clone()),
+            ..FakeAi::ready()
+        },
+        GraphBuilderConfig::default(),
+    )
+    .await;
+    let source = analysed(&app, "customers.csv", CUSTOMERS).await;
+    // As many stuck AI jobs as there are dataset workers (both default to 2).
+    let mut stuck = Vec::new();
+    for key in ["a", "b"] {
+        app.ai.respond(suggestion(customers_suggestion()));
+        stuck.push(
+            app.builder
+                .start_suggestion(app.graph_id, source, key)
+                .await
+                .unwrap(),
+        );
+    }
+    // Analysis still runs: AI jobs have their own workers.
+    analysed(&app, "more.csv", CUSTOMERS).await;
+    for job in &stuck {
+        let current = app.ingestion.get_job(job.id).await.unwrap();
+        assert!(!current.status.is_terminal(), "{:?}", current.status);
+    }
+    gate.add_permits(2);
+    for job in stuck {
+        assert_eq!(wait(&app, job.id).await.status, JobStatus::Completed);
+    }
+}
+
+#[tokio::test]
 async fn restart_recovery_includes_ai_jobs() {
     let app = app().await;
     let source = analysed(&app, "customers.csv", CUSTOMERS).await;
@@ -797,6 +833,7 @@ async fn too_many_repair_attempts_are_rejected() {
         &ingestion,
         GraphBuilderConfig {
             max_repair_attempts: 3,
+            ..GraphBuilderConfig::default()
         },
     );
     assert!(matches!(result, Err(ApplicationError::InvalidRequest(_))));
