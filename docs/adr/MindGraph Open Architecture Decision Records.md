@@ -757,7 +757,10 @@ llama.cpp). The validation chain above is implemented as: strict JSON →
 Pydantic schema (AI service) → explicit DTOs (`mindgraph-ai-client`) →
 domain constructors, base-ontology preservation and M4 `validate_mapping`
 (Rust, authoritative) → at most two repair attempts → a job result that the
-user reviews before anything is persisted.
+user reviews before any ontology version or graph data is written (the
+upload, its profile and the suggestion itself are stored as job state). The
+reviewed ontology is applied with `expected_version` set to the suggestion's
+base version, so a stale review cannot overwrite a newer ontology.
 
 # ADR-008: Dataset Ingestion and AI Graph Builder Pipeline
 

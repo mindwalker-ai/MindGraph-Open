@@ -31,15 +31,17 @@ interface Props {
   draft: BuilderDraft;
   fields: string[];
   onChange: (draft: BuilderDraft) => void;
+  /** Locks every control, e.g. while the ontology is being saved. */
+  disabled?: boolean;
 }
 
 /** Review and edit a draft: entities and relationships on the left, the
  * selected item's ontology and mapping on the right. */
-export function ReviewPanel({ draft, fields, onChange }: Props) {
+export function ReviewPanel({ draft, fields, onChange, disabled = false }: Props) {
   const [selection, setSelection] = useState<Selection>(
     draft.entities[0] ? { kind: "entity", key: draft.entities[0].key } : null,
   );
-  const typeOf = (alias: string) => draft.entities.find((e) => e.alias === alias)?.typeName ?? "?";
+  const typeOf = (key: string) => draft.entities.find((e) => e.key === key)?.typeName ?? "?";
   const entity =
     selection?.kind === "entity" ? draft.entities.find((e) => e.key === selection.key) : undefined;
   const relationship =
@@ -54,8 +56,13 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
     setSelection({ kind, key: list[list.length - 1].key });
   };
 
+  // A disabled fieldset disables every input, select and button inside it.
   return (
-    <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
+    <fieldset
+      disabled={disabled}
+      aria-label="Draft review"
+      className="grid min-w-0 gap-4 lg:grid-cols-[20rem_1fr]"
+    >
       <div className="flex flex-col gap-4">
         <Panel
           title="Entities"
@@ -114,7 +121,7 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
                   )}
                 >
                   <span className="truncate font-mono text-xs">
-                    {typeOf(r.sourceAlias)} ─{r.typeName}→ {typeOf(r.targetAlias)}
+                    {typeOf(r.sourceKey)} ─{r.typeName}→ {typeOf(r.targetKey)}
                   </span>
                   <span className="flex shrink-0 items-center gap-1">
                     <ConfidenceBadge value={r.confidence} />
@@ -251,9 +258,9 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
                   }
                 />
               </label>
-              {(["sourceAlias", "targetAlias"] as const).map((end) => (
+              {(["sourceKey", "targetKey"] as const).map((end) => (
                 <label key={end} className="text-xs text-muted">
-                  {end === "sourceAlias" ? "Source" : "Target"}
+                  {end === "sourceKey" ? "Source" : "Target"}
                   <select
                     className={inputClass}
                     value={relationship[end]}
@@ -264,7 +271,7 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
                     }
                   >
                     {draft.entities.map((e) => (
-                      <option key={e.key} value={e.alias}>
+                      <option key={e.key} value={e.key}>
                         {e.alias} ({e.typeName})
                       </option>
                     ))}
@@ -288,7 +295,7 @@ export function ReviewPanel({ draft, fields, onChange }: Props) {
           </Panel>
         )}
       </div>
-    </div>
+    </fieldset>
   );
 }
 

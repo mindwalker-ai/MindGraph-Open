@@ -60,8 +60,10 @@ Open **http://localhost:3000**, create a graph and click **Graph Builder**:
 5 Generate  "Generate Graph": saves the ontology, runs the M4 ingestion
 ```
 
-The AI only *suggests*. Nothing is written until you click **Generate
-Graph**, which uses the same endpoints as the curl examples below. Without an
+The AI only *suggests*. The uploaded file, its analysis profile and the
+suggestion are stored as you go, but no ontology version and no graph data
+are written until you click **Generate Graph**, which uses the same
+endpoints as the curl examples below. Without an
 AI provider the builder says so and the manual path works the same way. See
 [Use the AI Graph Builder (M5)](#use-the-ai-graph-builder-m5) to configure a
 model.
@@ -299,6 +301,14 @@ MINDGRAPH_LLM_BASE_URL=http://host.docker.internal:11434/v1   # Podman: host.con
 MINDGRAPH_LLM_MODEL=qwen3:8b
 ```
 
+Ollama listens on `127.0.0.1` by default. Docker Desktop and Podman on macOS
+and Windows forward `host.docker.internal` / `host.containers.internal` to
+it, but on Linux the name resolves to the bridge address, which a loopback
+listener does not accept. On Linux, bind Ollama to the bridge interface
+(for example `OLLAMA_HOST=172.17.0.1:11434 ollama serve`, the default Docker
+bridge; check yours with `ip addr show docker0`), not to `0.0.0.0`, and keep
+port 11434 closed in your firewall so only local containers can reach it.
+
 Leave `MINDGRAPH_LLM_PROVIDER` empty to disable AI; every manual flow keeps
 working. With the API (continuing the M4 example above, after `customers.csv`
 is analysed):
@@ -311,11 +321,16 @@ curl -N $API/jobs/$JOB/events                              # ends with "event: c
 curl -s $API/jobs/$JOB | jq '.result.suggestion | {entities: [.ontology.entity_types[].name],
   modes: [.mapping.entities[] | {alias, mode}], confidence, warnings}'
 
-# Review it, then apply it with the unchanged M4 endpoints:
-curl -s $API/jobs/$JOB | jq .result.suggestion.ontology > ontology.json
+# Review it, then apply it with the M4 endpoints. expected_version makes the
+# ontology write fail with 409 if another version became active meanwhile
+# (the body is a complete ontology, so a stale one would drop newer types):
+curl -s $API/jobs/$JOB | jq '.result | .suggestion.ontology + {expected_version: .ontology_version_base}' > ontology.json
 curl -s $API/jobs/$JOB | jq '{mapping: .result.suggestion.mapping}' > mapping.json
-curl -s -X POST $API/graphs/$GRAPH/ontology -H "Content-Type: application/json" -d @ontology.json
-curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+# --fail-with-body stops here on 409 (or any error), so the mapping is never
+# ingested against an ontology this example did not save:
+curl -s --fail-with-body -X POST $API/graphs/$GRAPH/ontology \
+  -H "Content-Type: application/json" -d @ontology.json \
+&& curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
   -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" -d @mapping.json
 ```
 
@@ -327,8 +342,10 @@ are reused.
 **What the model receives** when you request a suggestion: field names,
 inferred types, null counts, up to 5 sample values per field, up to 10
 sample rows, and the graph's current ontology. Never the file, the other
-records, graph contents, paths or credentials. Sample values are treated as
-untrusted data in the prompt; the model has no tools, and every answer is
+records, graph contents, paths or MindGraph's own credentials. Sample values
+are copied from your data unfiltered, so they can contain sensitive values
+(passwords, tokens, personal data) if your dataset does: use a local model
+for such data. Sample values are treated as untrusted data in the prompt; the model has no tools, and every answer is
 validated by Pydantic in the AI service and again, authoritatively, by Rust
 (existing types are never removed or changed). At most one repair attempt is
 made when Rust rejects a suggestion. Details:
@@ -382,10 +399,12 @@ Configuration uses environment variables (ADR-013). See
 | `MINDGRAPH_JOB_CONCURRENCY`   | core (M4) | `2` (1–16)                        |
 | `MINDGRAPH_AI_URL`            | core (M5) | `http://ai:8000`; unset disables AI in core |
 | `MINDGRAPH_AI_TIMEOUT_SECONDS` / `_MAX_REPAIR_ATTEMPTS` | core (M5) | `300` / `1` (0–2) |
+| `MINDGRAPH_AI_JOB_CONCURRENCY` | core (M5) | `2` (1–8); AI jobs have their own workers |
 | `MINDGRAPH_LLM_PROVIDER`      | ai (M5)   | empty (AI disabled); `openai_compatible` |
 | `MINDGRAPH_LLM_BASE_URL` / `_MODEL` | ai (M5) | empty (required with a provider) |
 | `MINDGRAPH_LLM_API_KEY`       | ai (M5)   | empty (optional; never logged)    |
 | `MINDGRAPH_LLM_TIMEOUT_SECONDS` / `_MAX_OUTPUT_TOKENS` / `_JSON_MODE` | ai (M5) | `60` / `4096` / `true` |
+| `MINDGRAPH_LLM_MAX_RETRIES`   | ai (M5)   | `2` (0–2): retries on 429 / 5xx / dropped connections |
 | `MINDGRAPH_TELEMETRY_ENABLED` | all       | `false`                           |
 
 Telemetry is off by default. MindGraph never collects graph contents,

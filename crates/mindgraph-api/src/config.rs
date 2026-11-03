@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mindgraph_core::{
-    DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY, DEFAULT_MAX_UPLOAD_BYTES, GraphBuilderConfig,
-    IngestionConfig, MAX_BATCH_SIZE, MAX_REPAIR_ATTEMPTS,
+    DEFAULT_AI_JOB_CONCURRENCY, DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY,
+    DEFAULT_MAX_UPLOAD_BYTES, GraphBuilderConfig, IngestionConfig, MAX_AI_JOB_CONCURRENCY,
+    MAX_BATCH_SIZE, MAX_REPAIR_ATTEMPTS,
 };
 use mindgraph_ingestion::Limits;
 
@@ -25,6 +26,7 @@ const JOB_CONCURRENCY_VAR: &str = "MINDGRAPH_JOB_CONCURRENCY";
 const AI_URL_VAR: &str = "MINDGRAPH_AI_URL";
 const AI_TIMEOUT_VAR: &str = "MINDGRAPH_AI_TIMEOUT_SECONDS";
 const AI_REPAIR_VAR: &str = "MINDGRAPH_AI_MAX_REPAIR_ATTEMPTS";
+const AI_JOB_CONCURRENCY_VAR: &str = "MINDGRAPH_AI_JOB_CONCURRENCY";
 
 /// Local-first default: only reachable from this machine. Docker Compose
 /// overrides it with `0.0.0.0:8080` inside the container network.
@@ -66,6 +68,8 @@ pub struct AiSettings {
     pub timeout: Duration,
     /// Repair attempts after Rust rejects a suggestion (`0..=2`).
     pub max_repair_attempts: u32,
+    /// AI jobs running at the same time (`1..=8`), on their own workers.
+    pub job_concurrency: usize,
 }
 
 impl AiSettings {
@@ -82,6 +86,7 @@ impl fmt::Debug for AiSettings {
             .field("enabled", &self.url.is_some())
             .field("timeout", &self.timeout)
             .field("max_repair_attempts", &self.max_repair_attempts)
+            .field("job_concurrency", &self.job_concurrency)
             .finish()
     }
 }
@@ -315,6 +320,12 @@ impl Config {
                 MAX_AI_TIMEOUT_SECONDS,
             )?),
             max_repair_attempts,
+            job_concurrency: small(number(
+                &lookup,
+                AI_JOB_CONCURRENCY_VAR,
+                DEFAULT_AI_JOB_CONCURRENCY as u64,
+                MAX_AI_JOB_CONCURRENCY as u64,
+            )?),
         };
 
         Ok(Self {
@@ -426,13 +437,16 @@ mod tests {
         );
         assert_eq!(defaults.ai.timeout, Duration::from_secs(300));
         assert_eq!(defaults.ai.max_repair_attempts, 1);
+        assert_eq!(defaults.ai.job_concurrency, 2);
         let configured = config(&[
             (DATABASE_URL_VAR, URL),
             (AI_URL_VAR, "http://ai:8000"),
             (AI_TIMEOUT_VAR, "60"),
             (AI_REPAIR_VAR, "0"),
+            (AI_JOB_CONCURRENCY_VAR, "4"),
         ])
         .unwrap();
+        assert_eq!(configured.ai.job_concurrency, 4);
         assert_eq!(configured.ai.url(), Some("http://ai:8000"));
         assert_eq!(configured.ai.timeout, Duration::from_secs(60));
         assert_eq!(configured.ai.max_repair_attempts, 0);
@@ -441,6 +455,8 @@ mod tests {
             (AI_REPAIR_VAR, "3"),
             (AI_TIMEOUT_VAR, "0"),
             (AI_TIMEOUT_VAR, "901"),
+            (AI_JOB_CONCURRENCY_VAR, "0"),
+            (AI_JOB_CONCURRENCY_VAR, "9"),
         ] {
             assert!(
                 matches!(

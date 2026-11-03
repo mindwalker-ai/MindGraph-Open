@@ -315,7 +315,8 @@ describe("GraphBuilder", () => {
     );
 
     expect(api.createOntology).toHaveBeenCalledTimes(1);
-    const ontology = api.createOntology.mock.calls[0][1];
+    const [, ontology, expectedVersion] = api.createOntology.mock.calls[0];
+    expect(expectedVersion).toBe(2);
     expect(ontology.entity_types.map((t: { name: string }) => t.name)).toEqual([
       "Customer",
       "Account",
@@ -347,6 +348,57 @@ describe("GraphBuilder", () => {
     expect(api.createOntology).toHaveBeenCalledTimes(1);
     expect(api.startIngestion).toHaveBeenCalledTimes(2);
     expect(api.startIngestion.mock.calls[0][3]).toBe(api.startIngestion.mock.calls[1][3]);
+  });
+
+  it("shows the review while the ontology is being saved", async () => {
+    const api = fakeApi();
+    let save: (value: unknown) => void = () => {};
+    api.createOntology.mockReturnValueOnce(
+      new Promise((resolve) => {
+        save = resolve;
+      }),
+    );
+    await reviewed(api);
+    fireEvent.click(screen.getByRole("button", { name: "Generate Graph" }));
+    const saving = await screen.findByRole("button", { name: "Saving ontology…" });
+    expect((saving as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("list", { name: "Entities" })).toBeDefined();
+    // The review is locked: an edit now would be lost when the save completes.
+    const review = screen.getByRole("group", { name: "Draft review" }) as HTMLFieldSetElement;
+    expect(review.disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "+ Add entity" }) as HTMLButtonElement).matches(
+        ":disabled",
+      ),
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Discard draft" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    save({ ...ONTOLOGY, version: 3 });
+    expect(await screen.findByText("Graph generated")).toBeDefined();
+  });
+
+  it("explains a concurrent ontology change reported by the server", async () => {
+    const api = fakeApi();
+    api.createOntology.mockRejectedValueOnce(new ApiError(409, "CONFLICT", "stale"));
+    await reviewed(api);
+    fireEvent.click(screen.getByRole("button", { name: "Generate Graph" }));
+    expect(
+      await screen.findByText(/The ontology changed since this draft was created/),
+    ).toBeDefined();
+    expect(api.startIngestion).not.toHaveBeenCalled();
+  });
+
+  it("keeps a finished ingestion finished when refreshing the graph fails", async () => {
+    const api = fakeApi();
+    await reviewed(api);
+    api.getGraph.mockRejectedValue(new ApiError(502, "HTTP_ERROR", "Request failed with HTTP 502"));
+    fireEvent.click(screen.getByRole("button", { name: "Generate Graph" }));
+    expect(await screen.findByText("Graph generated")).toBeDefined();
+    await waitFor(() => expect(api.getGraph).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Graph generated")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Retry ingestion" })).toBeNull();
+    expect(api.startIngestion).toHaveBeenCalledTimes(1);
   });
 
   it("blocks generation while the draft is invalid", async () => {

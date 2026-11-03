@@ -506,11 +506,14 @@ the job fails with `AI_VALIDATION_FAILED`.
 
 ### Jobs
 
-`ai_suggest` reuses the M4 job table, executor and API:
+`ai_suggest` reuses the M4 job table, executor code and API:
 
 - **Executor**: M4's dispatcher became a generic `JobExecutor` with one
-  handler per job kind; all kinds share the bounded queue and
-  `MINDGRAPH_JOB_CONCURRENCY`.
+  handler per job kind. Analysis and ingestion share one instance
+  (`MINDGRAPH_JOB_CONCURRENCY`); AI jobs run on their own instance with its
+  own queue (64) and `MINDGRAPH_AI_JOB_CONCURRENCY` (2, at most 8), so slow
+  model calls never delay dataset jobs. A result the job store refuses fails
+  the job with `RESULT_NOT_RECORDED` instead of leaving it `running`.
 - **Idempotency**: required `Idempotency-Key`; the same key for the same data
   source returns the original job without another provider call; another
   data source or job kind is `409`.
@@ -520,7 +523,10 @@ the job fails with `AI_VALIDATION_FAILED`.
 - **Result**: prompt version, provider, model, base version, repair count
   and the validated suggestion. Never the prompt, raw provider output or
   reasoning (migration `20261103140000_m5_graph_builder.sql`, result capped
-  at 512 KiB).
+  at 512 KiB; the worker fails larger suggestions with `AI_RESULT_TOO_LARGE`
+  before storing them).
+- **Repair**: the errors sent back with a repair request are bounded to the
+  AI service schema (50 errors of at most 500 characters).
 - **Restart**: `ai_suggest` jobs left `queued` or `running` fail with
   `PROCESS_RESTARTED`, like every other kind.
 - **Preflight** (`503 AI_NOT_CONFIGURED` / `AI_UNAVAILABLE`, `409` if the data
@@ -533,8 +539,9 @@ the job fails with `AI_VALIDATION_FAILED`.
 Review (entities and relationships with confidence bands and
 Existing/New badges, warnings; edit names, properties, types, required,
 identity, source fields, modes, endpoints; add and delete), Generate.
-**Generate Graph** validates the draft locally, re-checks that the ontology
-version has not changed, posts the ontology (skipped when unchanged), then
+**Generate Graph** validates the draft locally, posts the ontology with
+`expected_version` set to the draft's base version (skipped when unchanged;
+the server rejects a stale base atomically with `409`), then
 posts the mapping as an ingestion with one idempotency key and follows the
 job. If the ingestion cannot start after the ontology was saved, the page
 says so and **Retry ingestion** reuses the same key without creating another
@@ -547,7 +554,6 @@ ontology version. `/graphs/{graph_id}/explore` is a placeholder for M6.
   drafts beyond the job result; the review draft lives in the browser tab.
 - The UI keeps the uploaded data source in page state: reloading the page
   starts a new upload.
-- AI jobs share `MINDGRAPH_JOB_CONCURRENCY` with ingestion jobs.
 - Confidence values are the model's own estimates, not calibrated
   probabilities.
 - `/ready` of core does not include the AI service (AI is optional); see

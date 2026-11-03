@@ -45,4 +45,33 @@ describe("createApiClient", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 503, code: "AI_NOT_CONFIGURED", requestId: "r1" });
   });
+
+  it("turns non-JSON answers into ApiError", async () => {
+    const html = new Response("<html>Bad Gateway</html>", { status: 502 });
+    const fetcher = vi.fn().mockResolvedValue(html);
+    const error = await createApiClient("", fetcher)
+      .getGraph("g")
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({
+      status: 502,
+      code: "HTTP_ERROR",
+      message: "Request failed with HTTP 502",
+    });
+
+    fetcher.mockResolvedValue(new Response("not json", { status: 200 }));
+    await expect(createApiClient("", fetcher).getGraph("g")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("sends the expected ontology version when given", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => reply(201, { version: 3 }));
+    const draft = { entity_types: [], relationship_types: [] };
+    const api = createApiClient("", fetcher);
+    await api.createOntology("g1", draft, 2);
+    await api.createOntology("g1", draft);
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ ...draft, expected_version: 2 });
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual(draft);
+  });
 });

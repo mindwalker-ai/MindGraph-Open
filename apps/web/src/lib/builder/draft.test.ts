@@ -123,8 +123,8 @@ describe("fromSuggestion", () => {
     expect(account.confidence).toBe(0.55);
     expect(draft.relationships[0]).toMatchObject({
       typeName: "OWNS",
-      sourceAlias: "customer",
-      targetAlias: "account",
+      sourceKey: customer.key,
+      targetKey: account.key,
     });
     expect(validateDraft(draft, ACCOUNT_FIELDS)).toEqual([]);
   });
@@ -149,8 +149,29 @@ describe("edits", () => {
   it("renaming an alias keeps its relationships", () => {
     const draft = fromSuggestion(accountsSuggestion(), WITH_CUSTOMER);
     const next = updateEntity(draft, draft.entities[1].key, { alias: "acct" });
-    expect(next.relationships[0].targetAlias).toBe("acct");
+    expect(next.relationships[0].targetKey).toBe(draft.entities[1].key);
+    expect(toSubmission(next).mapping.relationships[0]).toMatchObject({
+      source: "customer",
+      target: "acct",
+    });
     expect(validateDraft(next, ACCOUNT_FIELDS)).toEqual([]);
+  });
+
+  it("an alias briefly equal to another one does not take its relationships", () => {
+    const draft = fromSuggestion(accountsSuggestion(), WITH_CUSTOMER);
+    const [customer, account] = draft.entities;
+    // Typing "customer_x" into the account alias, one keystroke at a time.
+    let next = updateEntity(draft, account.key, { alias: "customer" });
+    expect(validateDraft(next, ACCOUNT_FIELDS)).toContain('Alias "customer" is used twice.');
+    next = updateEntity(next, account.key, { alias: "customer_x" });
+    expect(next.relationships[0]).toMatchObject({
+      sourceKey: customer.key,
+      targetKey: account.key,
+    });
+    expect(toSubmission(next).mapping.relationships[0]).toMatchObject({
+      source: "customer",
+      target: "customer_x",
+    });
   });
 
   it("existing properties cannot be retyped or removed, only remapped", () => {
