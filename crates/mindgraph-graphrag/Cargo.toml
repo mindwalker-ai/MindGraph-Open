@@ -1,0 +1,15 @@
+[package]
+name = "mindgraph-graphrag"
+description = "Graph-first retrieval for GraphRAG in MindGraph Open."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mindgraph-domain.workspace = true
+
+[lints]
+workspace = true

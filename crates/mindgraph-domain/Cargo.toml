@@ -1,0 +1,22 @@
+[package]
+name = "mindgraph-domain"
+description = "Infrastructure-independent domain model for MindGraph Open."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# ADR-002: this crate must stay free of infrastructure dependencies
+# (no Axum, SQLx, HugeGraph clients, HTTP clients, or async runtimes).
+# CI enforces this with `make check-domain-boundary`.
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+# Build context for docker/core.Dockerfile is the repo root.
+# Only the Cargo workspace is needed; everything else is excluded.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+crates/**/target

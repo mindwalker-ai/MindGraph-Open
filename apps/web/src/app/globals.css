@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+/*
+ * Dark-first design tokens (PRD §29). These are placeholders until the
+ * Graph Explorer design from the Pen.dev mockup is implemented in M6.
+ */
+:root {
+  --background: #0a0b0f;
+  --foreground: #e6e8ee;
+  --muted: #8a8f9c;
+  --border: #22252e;
+  --accent: #3b6cf6;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}

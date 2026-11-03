@@ -1,0 +1,43 @@
+[project]
+name = "mindgraph-ai"
+version = "0.1.0"
+description = "MindGraph Open AI service: LLM integration, ontology suggestion and GraphRAG synthesis."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+dependencies = [
+    "fastapi>=0.162.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.0",
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
+
+[tool.uv]
+# An application, not a library: dependencies are installed, the project is not.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "B",    # flake8-bugbear
+  "UP",   # pyupgrade
+  "SIM",  # flake8-simplify
+  "RUF",  # ruff-specific rules
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"

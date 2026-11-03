@@ -1,0 +1,123 @@
+# MindGraph Open local stack (ADR-013).
+#
+#   docker compose up --build      then open http://localhost:3000
+#
+# Only `web` and `core` publish ports, and only on 127.0.0.1. `postgres`,
+# `hugegraph` and `ai` stay on the internal Docker network. Every setting
+# has a local default; override it in a `.env` file (see .env.example).
+
+name: mindgraph
+
+services:
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: ../../docker/web.Dockerfile
+    ports:
+      - "127.0.0.1:${MINDGRAPH_WEB_PORT:-3000}:3000"
+    environment:
+      MINDGRAPH_CORE_URL: http://core:8080
+    depends_on:
+      core:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  core:
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
+    ports:
+      - "127.0.0.1:${MINDGRAPH_CORE_PORT:-8080}:8080"
+    environment:
+      MINDGRAPH_CORE_BIND_ADDR: 0.0.0.0:8080
+      # Passed through now, used from M2/M3 onward.
+      MINDGRAPH_DATABASE_URL: postgres://${MINDGRAPH_POSTGRES_USER:-mindgraph}:${MINDGRAPH_POSTGRES_PASSWORD:-mindgraph}@postgres:5432/${MINDGRAPH_POSTGRES_DB:-mindgraph}
+      MINDGRAPH_HUGEGRAPH_URL: http://hugegraph:8080
+      MINDGRAPH_AI_URL: http://ai:8000
+      MINDGRAPH_TELEMETRY_ENABLED: ${MINDGRAPH_TELEMETRY_ENABLED:-false}
+      RUST_LOG: ${RUST_LOG:-info}
+    # Core deliberately does not depend on `ai`: graph features must keep
+    # working when the AI service is unavailable (ADR-007).
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hugegraph:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  ai:
+    build:
+      context: ./services/ai
+      dockerfile: ../../docker/ai.Dockerfile
+    expose:
+      - "8000"
+    environment:
+      MINDGRAPH_LLM_PROVIDER: ${MINDGRAPH_LLM_PROVIDER:-}
+      MINDGRAPH_LLM_API_KEY: ${MINDGRAPH_LLM_API_KEY:-}
+      MINDGRAPH_TELEMETRY_ENABLED: ${MINDGRAPH_TELEMETRY_ENABLED:-false}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${MINDGRAPH_POSTGRES_USER:-mindgraph}
+      POSTGRES_PASSWORD: ${MINDGRAPH_POSTGRES_PASSWORD:-mindgraph}
+      POSTGRES_DB: ${MINDGRAPH_POSTGRES_DB:-mindgraph}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  hugegraph:
+    image: hugegraph/hugegraph:1.7.0
+    # The image declares /hugegraph-server as its volume. It holds both the
+    # RocksDB data and the "already initialised" marker. After changing the
+    # image version, recreate it with `docker compose down -v`.
+    volumes:
+      - hugegraph-data:/hugegraph-server
+    healthcheck:
+      # The image ships neither curl nor wget, so bash's /dev/tcp sends the request.
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /versions HTTP/1.0\r\n\r\n" >&3 && head -n1 <&3 | grep -q " 200"'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  hugegraph-data:

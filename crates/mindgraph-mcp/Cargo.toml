@@ -1,0 +1,16 @@
+[package]
+name = "mindgraph-mcp"
+description = "Model Context Protocol server for MindGraph Open."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# ADR-015: MCP packages are proposed as Apache-2.0 (pending legal approval).
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mindgraph-core.workspace = true
+
+[lints]
+workspace = true
