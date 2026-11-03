@@ -20,16 +20,26 @@ mindgraph-core = { path = "crates/mindgraph-core" }
 # Domain
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+# float_roundtrip: parse floats with correct rounding so stored property
+# values survive an encode/decode cycle bit-for-bit.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror = "2.0.21"
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
 
 # Runtime / HTTP (never used by mindgraph-domain)
+async-trait = "0.1.92"
 axum = "0.8.9"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+# No TLS: HugeGraph is an internal backend reached over plain HTTP on the
+# Docker network (ADR-013). `gzip` is required because HugeGraph 1.7.0
+# always gzip-compresses list and traverser responses.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "gzip"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+# Test-only
+wiremock = "0.6.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

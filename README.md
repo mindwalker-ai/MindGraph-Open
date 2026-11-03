@@ -12,9 +12,10 @@ connect your AI agents through MCP.
 Data → Graph → Explore → Ask → Investigate → Connect to AI Agents
 ```
 
-> **Status: pre-alpha.** Milestones **M0** (repository bootstrap) and **M1**
-> (domain foundation) are complete. The graph store, ingestion, graph explorer,
-> GraphRAG and MCP arrive in the next milestones. See the [roadmap](#roadmap).
+> **Status: pre-alpha.** Milestones **M0** (repository bootstrap), **M1**
+> (domain foundation) and **M2** (graph storage) are complete. Project APIs,
+> ingestion, the graph explorer, GraphRAG and MCP arrive in the next
+> milestones. See the [roadmap](#roadmap).
 
 ---
 
@@ -114,9 +115,17 @@ make help      # list all targets
 | `make ai-check`              | Ruff lint, Ruff format check, pytest                          |
 | `make check-domain-boundary` | Fail if `mindgraph-domain` depends on infrastructure crates   |
 | `make fmt`                   | Format Rust, TypeScript and Python                            |
+| `make hugegraph-test-up`     | Start a throwaway HugeGraph 1.7 on `127.0.0.1:18080`          |
+| `make test-hugegraph`        | Run the `GraphStore` contract against that live HugeGraph     |
 
-Tests never need PostgreSQL, HugeGraph, Python services or network access.
-They run fully in-process.
+The default test run never needs PostgreSQL, HugeGraph, Python services or
+network access. Live HugeGraph tests are opt-in:
+
+```bash
+make hugegraph-test-up      # add CONTAINER=podman to use Podman
+make test-hugegraph
+make hugegraph-test-down
+```
 
 ### Tooling
 
@@ -127,7 +136,9 @@ They run fully in-process.
 | Python     | Ruff      | Ruff          | pytest       |
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the
-above on every pull request, and also validates and builds the Docker images.
+above on every pull request. It also runs the live HugeGraph contract suite
+against a `hugegraph/hugegraph:1.7.0` service container, and validates and
+builds the Docker images.
 
 ## Domain model (M1)
 
@@ -154,6 +165,23 @@ Workspace
   empty graph names, invalid type names, duplicate types, relationship types
   whose endpoints do not exist, and endpoint type mismatches.
 
+## Graph storage (M2)
+
+`crates/mindgraph-graph` defines the `GraphStore` trait, the only way
+application code reads or writes graph data (ADR-004):
+
+- `MemoryGraphStore` is the in-memory reference implementation, used by
+  tests and local development.
+- `HugeGraphStore` is the Apache HugeGraph 1.7 adapter. It uses one generic
+  physical schema (`mindgraph_entity` vertices, `mindgraph_relationship`
+  edges) and stores domain properties in a lossless typed encoding.
+
+Every operation is scoped to one `GraphId`: graphs never see or change each
+other's data, and `clear_graph` clears one graph project, never the
+database. Both backends pass the same contract test suite. Details,
+the physical mapping and current limitations are in
+[`docs/architecture/`](docs/architecture/README.md#graph-storage-adr-004-m2).
+
 ## Configuration
 
 Configuration uses environment variables (ADR-013). See
@@ -179,8 +207,8 @@ the Docker image and in CI.
 | --------- | -------------------------------------------------------- | ------- |
 | M0        | Repository bootstrap: monorepo, Compose, CI              | ✅ Done |
 | M1        | Domain foundation: types, UUIDv7 IDs, validation, errors | ✅ Done |
-| M2        | GraphStore trait, `MemoryGraphStore`, `HugeGraphStore`   | Next    |
-| M3        | PostgreSQL migrations, project and metadata APIs         | Planned |
+| M2        | GraphStore trait, `MemoryGraphStore`, `HugeGraphStore`   | ✅ Done |
+| M3        | PostgreSQL migrations, project and metadata APIs         | Next    |
 | M4        | CSV / JSON ingestion without AI                          | Planned |
 | M5        | AI Graph Builder (ontology suggestion, review, generate) | Planned |
 | M6        | Visual Graph Explorer (Sigma.js, Graphology)             | Planned |
