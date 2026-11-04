@@ -12,10 +12,10 @@ connect your AI agents through MCP.
 Data → Graph → Explore → Ask → Investigate → Connect to AI Agents
 ```
 
-> **Status: pre-alpha.** Milestones **M0** (repository bootstrap), **M1**
-> (domain foundation), **M2** (graph storage) and **M3** (project and metadata
-> APIs) are complete. Ingestion, the graph explorer, GraphRAG and MCP arrive in
-> the next milestones. See the [roadmap](#roadmap).
+> **Status: pre-alpha.** Milestones **M0** to **M6** are complete: graph
+> storage, project APIs, dataset ingestion, the AI Graph Builder and the
+> visual Graph Explorer. GraphRAG and MCP arrive in the next milestones. See
+> the [roadmap](#roadmap).
 
 ---
 
@@ -65,17 +65,46 @@ Generate          saves the ontology, then ingests each file, creators first
 The AI only *suggests*. The uploaded files, their analysis profiles and the
 suggestion are stored as you go, but no ontology version and no graph data
 are written until you click **Generate Graph**, which uses the same
-endpoints as the curl examples below. Screens of later milestones (Graph
-Explorer, Ask, GraphRAG, MCP, templates, the demo) are shown in the
-navigation but disabled until they ship. Without an
+endpoints as the curl examples below. When it finishes, **Explore Graph**
+opens the result in the Graph Explorer. Screens of later milestones (Ask,
+GraphRAG, MCP, templates, the demo) are shown in the navigation but disabled
+until they ship. Without an
 AI provider the builder says so and the manual path works the same way. See
 [Use the AI Graph Builder (M5)](#use-the-ai-graph-builder-m5) to configure a
 model.
 
+### Explore a graph (M6)
+
+Open a graph with **Explore Graph** on its card on the home page (or on the
+builder's success screen), or go to `/graphs/<graph_id>/explore`. The Graph
+Explorer is a read-only investigation workspace:
+
+```text
+Find entities     exact search by entity type, property and value, or open
+                  an entity by its ID (no full-text or fuzzy search)
+Inspect           click an entity or relationship: typed properties and the
+                  relationships loaded around it
+Expand            double-click (or E) loads an entity's neighbours: both
+                  directions or one, optionally one relationship type, at
+                  most 100 relationships per expansion (up to 1,000)
+Find Path         the shortest path between two entities, computed by
+                  MindGraph Core within a maximum depth (1-6 hops), then
+                  highlighted; "no path" only means none within that depth
+Layouts and view  force-directed or circular layout, fit, zoom, hide entities
+                  and types, reset; nothing here changes the stored graph
+```
+
+The canvas shows the subgraph loaded so far, never the whole graph: it starts
+from one entity's neighbourhood and grows as you expand. The browser holds at
+most 500 entities and 1,500 relationships; past that, the explorer says what
+was left out and offers to unload hidden entities or reset the view. The
+counts in the status bar are what is loaded, not totals of the graph.
+
 ### Load a dataset without AI (M4)
 
 The files in [`examples/fraud/`](examples/fraud/) build
-`Customer ──OWNS──> Account` deterministically. The commands use
+`Customer ──OWNS──> Account` and `Customer ──USES──> Device` deterministically
+(synthetic data). The commands use
 [`jq`](https://jqlang.org) to read ids; without it, copy the ids by hand.
 Nothing here needs Python or the AI service.
 
@@ -112,6 +141,33 @@ JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
   -d @examples/fraud/accounts.mapping.json | jq -r .id)
 sleep 1 && curl -s $API/jobs/$JOB | jq '{status, result}'
 # → {"records_processed": 7, "entities_created": 7, "entities_matched": 5, "relationships_created": 7}
+
+# 6. Devices: two customers share DEVICE-921 (Customer ─USES→ Device).
+SOURCE=$(curl -s -F file=@examples/fraud/devices.csv $API/graphs/$GRAPH/data-sources | jq -r .id)
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/analyze | jq -r .job_id)
+sleep 1 && curl -s $API/jobs/$JOB | jq .status
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" \
+  -d @examples/fraud/devices.mapping.json | jq -r .id)
+sleep 1 && curl -s $API/jobs/$JOB | jq '{status, result}'
+# → {"records_processed": 4, "entities_created": 3, "entities_matched": 3, "relationships_created": 4}
+```
+
+Then open `http://localhost:3000/graphs/$GRAPH/explore`: select Alice Tan,
+expand her neighbourhood (her accounts through `OWNS`, her devices through
+`USES`), and find the path to Budi Santoso, two hops through the shared
+`DEVICE-921`. The same reads are available over the API:
+
+```bash
+ALICE=$(curl -s -X POST $API/graphs/$GRAPH/entities/search -H "Content-Type: application/json" \
+  -d '{"entity_type": "Customer", "property_filters": {"customer_id": "C001"}}' | jq -r '.data[0].id')
+BUDI=$(curl -s -X POST $API/graphs/$GRAPH/entities/search -H "Content-Type: application/json" \
+  -d '{"entity_type": "Customer", "property_filters": {"customer_id": "C002"}}' | jq -r '.data[0].id')
+curl -s "$API/graphs/$GRAPH/entities/$ALICE/neighbors?direction=outgoing&limit=100" \
+  | jq '[.relationships[].relationship_type]'                   # → ["OWNS", "OWNS", "USES", "USES"]
+curl -s -X POST $API/graphs/$GRAPH/paths -H "Content-Type: application/json" \
+  -d "{\"source_id\": \"$ALICE\", \"target_id\": \"$BUDI\", \"max_depth\": 3}" \
+  | jq '{found, hops, via: [.relationships[].relationship_type]}' # → 2 hops via USES, USES
 ```
 
 Submitting the same `Idempotency-Key` again returns the same job instead of
@@ -139,7 +195,7 @@ changes from `draft` to `active`.
 > **Rust owns the graph platform. Python owns AI-specific intelligence.**
 
 ```text
-           Next.js + TypeScript + Tailwind + shadcn/ui (+ Sigma.js in M6)
+        Next.js + TypeScript + Tailwind + Sigma.js / Graphology (WebGL)
                                   │  REST / SSE
                                   ▼
                  mindgraph-core  (Rust · Axum · Tokio)  ── modular monolith
@@ -437,8 +493,8 @@ the Docker image and in CI.
 | M3        | PostgreSQL migrations, project and metadata APIs         | ✅ Done |
 | M4        | CSV / JSON ingestion without AI                          | ✅ Done |
 | M5        | AI Graph Builder (ontology suggestion, review, generate) | ✅ Done |
-| M6        | Visual Graph Explorer (Sigma.js, Graphology)             | Next    |
-| M7        | GraphRAG with evidence graphs                            | Planned |
+| M6        | Visual Graph Explorer (Sigma.js, Graphology)             | ✅ Done |
+| M7        | GraphRAG with evidence graphs                            | Next    |
 | M8        | MCP server for Claude, Codex and Cursor                  | Planned |
 | M9        | Basic entity resolution                                  | Planned |
 | M10       | Launch hardening and demos                               | Planned |

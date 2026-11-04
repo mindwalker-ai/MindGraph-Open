@@ -75,4 +75,48 @@ describe("createApiClient", () => {
     expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ ...draft, expected_version: 2 });
     expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual(draft);
   });
+
+  it("calls the read-only explorer endpoints", async () => {
+    const empty = { entities: [], relationships: [] };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(reply(200, { data: [], count: 0, limit: 25 }))
+      .mockResolvedValueOnce(reply(200, empty))
+      .mockResolvedValueOnce(reply(200, empty))
+      .mockResolvedValueOnce(reply(200, { found: false, hops: 0, ...empty }))
+      .mockResolvedValueOnce(reply(200, empty));
+    const api = createApiClient("", fetcher);
+    await api.searchEntities("g1", { entity_type: "Customer", property_filters: { id: "C1" } });
+    await api.getNeighbors("g1", "e/1", { direction: "outgoing", relationship_type: "OWNS" });
+    await api.getNeighbors("g1", "e1");
+    await expect(
+      api.findPath("g1", "a", "b", { direction: "both", max_depth: 4 }),
+    ).resolves.toMatchObject({ found: false });
+    await api.getSubgraph("g1", ["a", "b"]);
+
+    const calls = fetcher.mock.calls.map(([url, init]) => [
+      url,
+      init?.method ?? "GET",
+      init?.body ? JSON.parse(init.body) : undefined,
+    ]);
+    expect(calls).toEqual([
+      [
+        "/api/v1/graphs/g1/entities/search",
+        "POST",
+        { entity_type: "Customer", property_filters: { id: "C1" } },
+      ],
+      [
+        "/api/v1/graphs/g1/entities/e%2F1/neighbors?direction=outgoing&relationship_type=OWNS",
+        "GET",
+        undefined,
+      ],
+      ["/api/v1/graphs/g1/entities/e1/neighbors", "GET", undefined],
+      [
+        "/api/v1/graphs/g1/paths",
+        "POST",
+        { source_id: "a", target_id: "b", direction: "both", max_depth: 4 },
+      ],
+      ["/api/v1/graphs/g1/subgraph", "POST", { entity_ids: ["a", "b"] }],
+    ]);
+  });
 });

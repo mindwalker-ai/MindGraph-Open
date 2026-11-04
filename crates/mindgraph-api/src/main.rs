@@ -21,9 +21,10 @@ use mindgraph_ai_client::HttpGraphBuilderAi;
 use mindgraph_api::{AppState, Config, SERVICE_NAME, router};
 use mindgraph_core::{
     DisabledGraphBuilderAi, GraphBuilderAi, GraphBuilderConfig, GraphBuilderService,
-    GraphProjectService, IngestionPorts, IngestionService, MetadataStore, OntologyService,
+    GraphExplorerService, GraphProjectService, IngestionPorts, IngestionService, MetadataStore,
+    OntologyService,
 };
-use mindgraph_graph::{HugeGraphConfig, HugeGraphStore};
+use mindgraph_graph::{GraphStore, HugeGraphConfig, HugeGraphStore};
 use mindgraph_ingestion::LocalSourceStore;
 use mindgraph_metadata::{PostgresMetadataStore, PostgresOptions};
 use tokio::net::TcpListener;
@@ -61,7 +62,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let metadata: Arc<dyn MetadataStore> = Arc::new(store);
 
-    let graph = connect_hugegraph(&config).await?;
+    // One HugeGraph adapter, shared by ingestion (writes) and the explorer (reads).
+    let graph: Arc<dyn GraphStore> = Arc::new(connect_hugegraph(&config).await?);
     tracing::info!("HugeGraph schema ready");
     let sources = LocalSourceStore::new(&config.data_dir)
         .await
@@ -70,10 +72,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let graph_projects = GraphProjectService::bootstrap(Arc::clone(&metadata)).await?;
     let workspace_id = graph_projects.workspace_id();
     let ontology = OntologyService::new(Arc::clone(&metadata), workspace_id);
+    let graph_explorer =
+        GraphExplorerService::new(Arc::clone(&metadata), Arc::clone(&graph), workspace_id);
     let ingestion = IngestionService::start(
         IngestionPorts {
             metadata,
-            graph: Arc::new(graph),
+            graph,
             sources: Arc::new(sources),
         },
         workspace_id,
@@ -100,7 +104,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Before serving: jobs of a previous process can never finish.
     ingestion.recover_incomplete_jobs().await?;
     let app = router(
-        AppState::new(graph_projects, ontology, ingestion).with_graph_builder(graph_builder),
+        AppState::new(graph_projects, ontology, ingestion)
+            .with_graph_builder(graph_builder)
+            .with_graph_explorer(graph_explorer),
     );
 
     let listener = TcpListener::bind(config.bind_addr).await?;

@@ -112,11 +112,18 @@ impl PropertyValue {
         }
     }
 
-    /// Decodes a non-null JSON value as `expected`.
+    /// Decodes a non-null JSON value as `expected` (`key` names the property
+    /// in errors), for example an exact-match search filter.
     ///
     /// Integers are accepted where a float is expected. Datetimes must be
     /// RFC 3339 strings and are normalised to UTC.
-    pub(crate) fn from_json(
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::PropertyTypeMismatch`] if the JSON kind does not fit
+    /// `expected`, or [`DomainError::InvalidPropertyValue`] for an integer out
+    /// of range or an invalid datetime.
+    pub fn from_json(
         key: &str,
         value: &Value,
         expected: PropertyType,

@@ -1,6 +1,6 @@
 //! The application error type shared by all use cases.
 
-use mindgraph_domain::{DataSourceId, DomainError, GraphId, IngestionJobId};
+use mindgraph_domain::{DataSourceId, DomainError, EntityId, GraphId, IngestionJobId};
 use mindgraph_graph::GraphStoreError;
 use mindgraph_ingestion::IngestionError;
 
@@ -31,6 +31,11 @@ pub enum ApplicationError {
     /// The job does not exist.
     #[error("job {0} was not found")]
     JobNotFound(IngestionJobId),
+
+    /// The entity does not exist in the requested graph (an entity of
+    /// another graph is missing too).
+    #[error("entity {0} was not found")]
+    EntityNotFound(EntityId),
 
     /// The write conflicts with existing data or the current state.
     #[error("conflict: {0}")]

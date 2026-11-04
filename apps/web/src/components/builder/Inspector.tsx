@@ -659,7 +659,7 @@ function RelationshipInspector({
             ))}
           </select>
         )}
-        <div className="flex items-center pt-0.5" title="Computed from the generated graph (M6)">
+        <div className="flex items-center pt-0.5" title="Not computed yet">
           <span className="flex-1 text-[12px] text-text-3">Cardinality</span>
           <span className="font-mono text-[10.5px] font-medium text-text-3">—</span>
         </div>

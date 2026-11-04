@@ -5,6 +5,8 @@
 //! ```text
 //! graph A: ontology → customers.csv → analyze → ingest
 //!          accounts.csv → analyze → ingest (Account + Customer lookup + OWNS)
+//!          devices.csv → analyze → ingest (Device + Customer lookup + USES)
+//!          Graph Explorer (M6): search, entity, neighbours, paths, subgraph
 //! graph B: ontology → customers.csv only, and must stay untouched by A
 //! ```
 
@@ -18,8 +20,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use mindgraph_api::{AppState, router};
 use mindgraph_core::{
-    GraphProjectService, IngestionConfig, IngestionPorts, IngestionService, MemoryMetadataStore,
-    MetadataStore, OntologyService,
+    GraphExplorerService, GraphProjectService, IngestionConfig, IngestionPorts, IngestionService,
+    MemoryMetadataStore, MetadataStore, OntologyService,
 };
 use mindgraph_domain::{Entity, GraphId, TypeName};
 use mindgraph_graph::{Direction, EntitySearch, GraphStore, NeighborQuery};
@@ -32,6 +34,8 @@ const ACCOUNTS: &str = include_str!("../../../../examples/fraud/accounts.csv");
 const ONTOLOGY: &str = include_str!("../../../../examples/fraud/ontology.json");
 const CUSTOMERS_MAPPING: &str = include_str!("../../../../examples/fraud/customers.mapping.json");
 const ACCOUNTS_MAPPING: &str = include_str!("../../../../examples/fraud/accounts.mapping.json");
+const DEVICES: &str = include_str!("../../../../examples/fraud/devices.csv");
+const DEVICES_MAPPING: &str = include_str!("../../../../examples/fraud/devices.mapping.json");
 const BOUNDARY: &str = "fraud-example-boundary";
 
 /// The router with in-memory metadata and source storage over `graph`.
@@ -41,6 +45,8 @@ pub async fn app(graph: Arc<dyn GraphStore>) -> Router {
         .await
         .unwrap();
     let workspace_id = graph_projects.workspace_id();
+    // The explorer reads through the same GraphStore the ingestion writes to.
+    let explorer = GraphExplorerService::new(metadata.clone(), graph.clone(), workspace_id);
     let ingestion = IngestionService::start(
         IngestionPorts {
             metadata: metadata.clone(),
@@ -55,11 +61,14 @@ pub async fn app(graph: Arc<dyn GraphStore>) -> Router {
         },
     )
     .unwrap();
-    router(AppState::new(
-        graph_projects,
-        OntologyService::new(metadata, workspace_id),
-        ingestion,
-    ))
+    router(
+        AppState::new(
+            graph_projects,
+            OntologyService::new(metadata, workspace_id),
+            ingestion,
+        )
+        .with_graph_explorer(explorer),
+    )
 }
 
 async fn call(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
@@ -216,6 +225,13 @@ pub async fn run(app: &Router, store: &dyn GraphStore) -> [GraphId; 2] {
             .all(|r| r.relationship_type().as_str() == "OWNS")
     );
 
+    let devices = load(app, &graph_a, "devices.csv", DEVICES, DEVICES_MAPPING).await;
+    assert_eq!(
+        devices["result"],
+        json!({"records_processed": 4, "entities_created": 3, "entities_matched": 3, "relationships_created": 4})
+    );
+    explore(app, &graph_a, &graph_b).await;
+
     // Graph B: only its own five customers, no accounts, nothing from A.
     let b_customers = of_type(store, b, "Customer").await;
     assert_eq!(b_customers.len(), 5);
@@ -224,4 +240,97 @@ pub async fn run(app: &Router, store: &dyn GraphStore) -> [GraphId; 2] {
     let ids_a: Vec<_> = customers.iter().map(Entity::id).collect();
     assert!(b_customers.iter().all(|c| !ids_a.contains(&c.id())));
     [a, b]
+}
+
+/// The Graph Explorer over the ingested data: find Alice, read her, expand
+/// her neighbourhood, find paths to an account and, through the shared
+/// device, to Budi, fetch a subgraph, and stay blind to graph B.
+async fn explore(app: &Router, graph_a: &str, graph_b: &str) {
+    let search = |filters: Value| {
+        json!({"entity_type": "Customer", "property_filters": filters, "limit": 10}).to_string()
+    };
+    let api = format!("/api/v1/graphs/{graph_a}");
+    let (status, found) = post(
+        app,
+        &format!("{api}/entities/search"),
+        &search(json!({"customer_id": "C001"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["count"], 1);
+    let alice = found["data"][0]["id"].as_str().unwrap().to_owned();
+    let (_, budi) = post(
+        app,
+        &format!("{api}/entities/search"),
+        &search(json!({"customer_id": "C002"})),
+        None,
+    )
+    .await;
+    let budi = budi["data"][0]["id"].as_str().unwrap().to_owned();
+
+    let (status, entity) = get(app, &format!("{api}/entities/{alice}")).await;
+    assert_eq!(status, StatusCode::OK, "{entity}");
+    assert_eq!(entity["properties"]["name"], "Alice Tan");
+    assert_eq!(entity["properties"]["age"], 34);
+    assert_eq!(entity["property_types"]["age"], "integer");
+
+    let (status, neighbours) = get(app, &format!("{api}/entities/{alice}/neighbors")).await;
+    assert_eq!(status, StatusCode::OK, "{neighbours}");
+    let mut types: Vec<&str> = neighbours["relationships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["relationship_type"].as_str().unwrap())
+        .collect();
+    types.sort_unstable();
+    assert_eq!(types, ["OWNS", "OWNS", "USES", "USES"]);
+    let uses = neighbours["relationships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["relationship_type"] == "USES")
+        .unwrap();
+    assert_eq!(uses["property_types"]["first_seen"], "datetime");
+    let account = neighbours["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["entity_type"] == "Account")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let path = |source: &str, target: &str| {
+        json!({"source_id": source, "target_id": target, "direction": "both", "max_depth": 4})
+            .to_string()
+    };
+    let (status, owns) = post(app, &format!("{api}/paths"), &path(&alice, &account), None).await;
+    assert_eq!(status, StatusCode::OK, "{owns}");
+    assert_eq!(owns["hops"], 1);
+    assert_eq!(owns["relationships"][0]["relationship_type"], "OWNS");
+    let (_, shared) = post(app, &format!("{api}/paths"), &path(&alice, &budi), None).await;
+    assert_eq!(shared["found"], true, "{shared}");
+    assert_eq!(shared["hops"], 2);
+    assert_eq!(
+        shared["entities"][1]["properties"]["device_id"],
+        "DEVICE-921"
+    );
+
+    let (status, subgraph) = post(
+        app,
+        &format!("{api}/subgraph"),
+        &json!({"entity_ids": [alice, account]}).to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{subgraph}");
+    assert_eq!(subgraph["entities"].as_array().unwrap().len(), 2);
+    assert_eq!(subgraph["relationships"][0]["relationship_type"], "OWNS");
+
+    // Graph B cannot see graph A's entities.
+    let (status, missing) = get(app, &format!("/api/v1/graphs/{graph_b}/entities/{alice}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(missing["error"]["code"], "ENTITY_NOT_FOUND");
 }

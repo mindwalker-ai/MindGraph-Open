@@ -199,3 +199,88 @@ export interface GraphBuilderStatus {
 export function isTerminal(status: JobStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
+
+// --- Graph Explorer (M6) ------------------------------------------------------
+
+/**
+ * A property value as the explorer endpoints render it: plain JSON, with
+ * datetimes as RFC 3339 strings and integers beyond 2^53 - 1 as decimal
+ * strings (`property_types` tells them apart).
+ */
+export type PropertyJson = string | number | boolean | string[];
+
+/** An entity of one graph (`GET /graphs/{id}/entities/{entity_id}`). */
+export interface Entity {
+  id: string;
+  graph_id: string;
+  entity_type: string;
+  properties: Record<string, PropertyJson>;
+  property_types: Record<string, PropertyType>;
+}
+
+/** A directed relationship between two entities of the same graph. */
+export interface Relationship {
+  id: string;
+  graph_id: string;
+  relationship_type: string;
+  source_id: string;
+  target_id: string;
+  properties: Record<string, PropertyJson>;
+  property_types: Record<string, PropertyType>;
+}
+
+/** Entities and the relationships among them, ordered by id. */
+export interface Subgraph {
+  entities: Entity[];
+  relationships: Relationship[];
+}
+
+/** A shortest path from source to target, or `found: false` within the depth. */
+export interface GraphPath {
+  found: boolean;
+  hops: number;
+  /** In order, from the source to the target. */
+  entities: Entity[];
+  /** `relationships[i]` connects `entities[i]` and `entities[i + 1]`. */
+  relationships: Relationship[];
+}
+
+export type Direction = "outgoing" | "incoming" | "both";
+
+export const DIRECTIONS: readonly Direction[] = ["both", "outgoing", "incoming"];
+
+/** Exact matching (`POST /graphs/{id}/entities/search`). */
+export interface EntitySearchQuery {
+  entity_type?: string;
+  /** Property key to exact value; values are typed by the active ontology. */
+  property_filters?: Record<string, PropertyJson>;
+  limit?: number;
+}
+
+export interface EntitySearchResult {
+  data: Entity[];
+  count: number;
+  limit: number;
+}
+
+export interface NeighborOptions {
+  direction?: Direction;
+  relationship_type?: string;
+  limit?: number;
+}
+
+export interface PathOptions {
+  direction?: Direction;
+  max_depth?: number;
+}
+
+/** Bounds of the explorer endpoints (`mindgraph-graph`). */
+export const EXPLORER_LIMITS = {
+  searchDefault: 100,
+  searchMax: 1000,
+  neighborDefault: 100,
+  neighborMax: 1000,
+  pathDefaultDepth: 3,
+  pathMaxDepth: 6,
+  subgraphMax: 1000,
+} as const;

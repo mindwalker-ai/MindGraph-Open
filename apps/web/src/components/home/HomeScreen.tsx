@@ -19,6 +19,7 @@ import {
   Plus,
   ShieldAlert,
   Upload,
+  Waypoints,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
@@ -290,11 +291,12 @@ function GraphCard({
   ontology: Ontology | null | undefined;
   index: number;
 }) {
+  // An active graph opens in the Explorer; a draft one still needs data.
+  const active = graph.status === "active";
+  const explore = `/graphs/${graph.id}/explore`;
+  const upload = `/graphs/${graph.id}/upload`;
   return (
-    <Link
-      href={`/graphs/${graph.id}/upload`}
-      className="flex min-w-0 flex-col border-border bg-bg hover:bg-raised [&:nth-child(n+2)]:border-t md:[&:nth-child(-n+3)]:border-t-0 md:[&:not(:nth-child(3n+1))]:border-l"
-    >
+    <div className="relative flex min-w-0 flex-col border-border bg-bg hover:bg-raised [&:nth-child(n+2)]:border-t md:[&:nth-child(-n+3)]:border-t-0 md:[&:not(:nth-child(3n+1))]:border-l">
       <OntologyThumbnail ontology={ontology} />
       <div className="flex flex-col gap-[10px] px-4 pt-[14px] pb-4">
         <div className="flex items-center gap-2">
@@ -302,15 +304,17 @@ function GraphCard({
             className="h-2 w-2 shrink-0 rounded-[2px]"
             style={{ background: DOTS[index % DOTS.length] }}
           />
-          <span className="flex-1 truncate text-[16px] font-bold">{graph.name}</span>
+          <Link
+            href={active ? explore : upload}
+            className="flex-1 truncate text-[16px] font-bold after:absolute after:inset-0"
+          >
+            {graph.name}
+          </Link>
           <span title={comingIn()} className="text-text-3">
             <Ellipsis size={14} />
           </span>
         </div>
-        <div
-          className="flex gap-6"
-          title="Entity and relationship counts arrive with the Graph Explorer (M6)"
-        >
+        <div className="flex gap-6" title="Graph-wide counts are not computed yet">
           {["entities", "relationships"].map((label) => (
             <div key={label} className="flex flex-col">
               <span className="text-[18px] font-semibold text-text-3">—</span>
@@ -324,8 +328,24 @@ function GraphCard({
           </span>
           <span className="text-[12px] text-text-3">{updatedAgo(graph.updated_at)}</span>
         </div>
+        <div className="relative z-10 flex items-center gap-4 text-[12.5px]">
+          {active && (
+            <Link
+              href={explore}
+              className="inline-flex items-center gap-1.5 font-semibold text-accent hover:text-accent/80"
+            >
+              <Waypoints size={13} /> Explore Graph
+            </Link>
+          )}
+          <Link
+            href={upload}
+            className="inline-flex items-center gap-1.5 text-text-2 hover:text-text"
+          >
+            <Upload size={13} /> Add data
+          </Link>
+        </div>
       </div>
-    </Link>
+    </div>
   );
 }
 

@@ -9,13 +9,20 @@
 
 import type {
   DataSource,
+  Entity,
+  EntitySearchQuery,
+  EntitySearchResult,
   GraphBuilderStatus,
+  GraphPath,
   GraphProject,
   IngestionMapping,
   Job,
   JobAccepted,
+  NeighborOptions,
   Ontology,
   OntologyDraft,
+  PathOptions,
+  Subgraph,
 } from "./types";
 
 /** A failed API call, carrying the stable error envelope fields. */
@@ -60,6 +67,20 @@ export interface ApiClient {
     idempotencyKey: string,
   ): Promise<JobAccepted>;
   getJob(jobId: string): Promise<Job>;
+  /** Exact search by entity type and property values (no full-text search). */
+  searchEntities(graphId: string, query: EntitySearchQuery): Promise<EntitySearchResult>;
+  getEntity(graphId: string, entityId: string): Promise<Entity>;
+  /** The entity, its matching relationships (bounded) and their other ends. */
+  getNeighbors(graphId: string, entityId: string, options?: NeighborOptions): Promise<Subgraph>;
+  /** A shortest path computed by MindGraph Core, or `found: false`. */
+  findPath(
+    graphId: string,
+    sourceId: string,
+    targetId: string,
+    options?: PathOptions,
+  ): Promise<GraphPath>;
+  /** The given entities plus every relationship among them. */
+  getSubgraph(graphId: string, entityIds: string[]): Promise<Subgraph>;
 }
 
 type Fetch = typeof fetch;
@@ -146,6 +167,25 @@ export function createApiClient(
         json("POST", { mapping }, { "Idempotency-Key": idempotencyKey }),
       ),
     getJob: (jobId) => call(`/jobs/${jobId}`),
+    searchEntities: (graphId, query) =>
+      call(`/graphs/${graphId}/entities/search`, json("POST", query)),
+    getEntity: (graphId, entityId) =>
+      call(`/graphs/${graphId}/entities/${encodeURIComponent(entityId)}`),
+    getNeighbors: (graphId, entityId, options = {}) => {
+      const params = new URLSearchParams();
+      if (options.direction) params.set("direction", options.direction);
+      if (options.relationship_type) params.set("relationship_type", options.relationship_type);
+      if (options.limit !== undefined) params.set("limit", String(options.limit));
+      const query = params.size ? `?${params}` : "";
+      return call(`/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/neighbors${query}`);
+    },
+    findPath: (graphId, sourceId, targetId, options = {}) =>
+      call(
+        `/graphs/${graphId}/paths`,
+        json("POST", { source_id: sourceId, target_id: targetId, ...options }),
+      ),
+    getSubgraph: (graphId, entityIds) =>
+      call(`/graphs/${graphId}/subgraph`, json("POST", { entity_ids: entityIds })),
   };
 }
 

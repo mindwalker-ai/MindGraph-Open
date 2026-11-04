@@ -19,6 +19,14 @@
         { "name": "balance", "type": "float", "required": false },
         { "name": "opened_at", "type": "datetime", "required": false }
       ]
+    },
+    {
+      "name": "Device",
+      "display_name": "Device",
+      "properties": [
+        { "name": "device_id", "type": "string", "required": true },
+        { "name": "device_type", "type": "string", "required": false }
+      ]
     }
   ],
   "relationship_types": [
@@ -27,6 +35,12 @@
       "source_entity_type": "Customer",
       "target_entity_type": "Account",
       "properties": []
+    },
+    {
+      "name": "USES",
+      "source_entity_type": "Customer",
+      "target_entity_type": "Device",
+      "properties": [{ "name": "first_seen", "type": "datetime", "required": false }]
     }
   ]
 }

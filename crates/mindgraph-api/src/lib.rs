@@ -29,6 +29,7 @@ mod config;
 mod datasets;
 mod dto;
 mod error;
+mod explorer;
 mod request_context;
 mod routes;
 

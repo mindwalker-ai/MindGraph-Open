@@ -15,6 +15,12 @@ info:
     with the ordinary ontology and ingestion endpoints. The AI never writes
     graph data, ontologies or mappings.
 
+    The Graph Explorer (M6) reads graphs through five read-only endpoints:
+    exact entity search, one entity, a bounded neighbourhood, a bounded
+    shortest path and the subgraph among given entities. Every read is
+    scoped to one graph and bounded; there is no endpoint that returns a
+    whole graph, no full-text search and no graph-wide statistics.
+
     Dataset ingestion (M4) is deterministic and needs no AI service:
     define an ontology, upload a CSV or JSON file, analyse it (an
     asynchronous job), then submit a mapping (another job). Jobs are
@@ -34,6 +40,8 @@ tags:
     description: AI Graph Builder suggestions (M5, optional).
   - name: jobs
     description: Background analysis, ingestion and AI suggestion jobs.
+  - name: explorer
+    description: Read-only, bounded graph exploration (M6).
 paths:
   /health:
     get:
@@ -458,6 +466,152 @@ paths:
                   code: AI_NOT_CONFIGURED
                   message: The AI Graph Builder is not configured; build the ontology and mapping manually
                   request_id: 0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f
+  /api/v1/graphs/{graph_id}/entities/search:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    post:
+      tags: [explorer]
+      operationId: searchEntities
+      summary: Find entities by type and exact property values
+      description: |
+        Exact matching only (no full-text, fuzzy or semantic search). Filter
+        values are typed with the active ontology: give `entity_type`, or use
+        properties whose type is the same in every entity type. Integers may
+        be sent as decimal strings. Results are ordered by id and capped at
+        `limit`, so `count` is the number returned, not a total.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EntitySearchRequest" }
+            example:
+              entity_type: Customer
+              property_filters: { customer_id: C001 }
+              limit: 25
+      responses:
+        "200":
+          description: The matching entities.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EntitySearchResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/entities/{entity_id}:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/EntityId"
+    get:
+      tags: [explorer]
+      operationId: getEntity
+      summary: Read one entity
+      description: An entity of another graph is `404 ENTITY_NOT_FOUND`.
+      responses:
+        "200":
+          description: The entity.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entity" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/entities/{entity_id}/neighbors:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/EntityId"
+    get:
+      tags: [explorer]
+      operationId: getNeighbors
+      summary: Expand an entity's neighbourhood
+      description: |
+        The entity itself, its matching relationships (at most `limit`,
+        smallest ids first) and the entities at their other ends. When as
+        many relationships as `limit` come back, the entity may have more.
+      parameters:
+        - name: direction
+          in: query
+          description: Relationships leaving the entity, reaching it, or both.
+          schema: { type: string, enum: [outgoing, incoming, both], default: both }
+        - name: relationship_type
+          in: query
+          description: Only relationships of this type.
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: At most this many relationships.
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        "200":
+          description: The neighbourhood.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subgraph" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/paths:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    post:
+      tags: [explorer]
+      operationId: findPath
+      summary: Find a shortest path between two entities
+      description: |
+        A path with the fewest hops, computed by the graph store, of at most
+        `max_depth` hops. `found: false` only means there is none within that
+        depth and direction. A path from an entity to itself has zero hops.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PathRequest" }
+      responses:
+        "200":
+          description: The path, or `found` false.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GraphPath" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/subgraph:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    post:
+      tags: [explorer]
+      operationId: getSubgraph
+      summary: Read given entities and the relationships among them
+      description: |
+        Returns the named entities that exist in the graph, plus every
+        relationship whose two ends are both among them. Missing and repeated
+        ids are ignored; no other entities are added.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubgraphRequest" }
+      responses:
+        "200":
+          description: The subgraph.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subgraph" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /api/v1/graph-builder/status:
     get:
       tags: [graph-builder]
@@ -536,6 +690,12 @@ components:
       required: true
       description: A data source id (UUIDv7). Anything else is `400 INVALID_DATA_SOURCE_ID`.
       schema: { type: string, format: uuid }
+    EntityId:
+      name: entity_id
+      in: path
+      required: true
+      description: An entity id (UUIDv7). Anything else is `400 INVALID_ENTITY_ID`.
+      schema: { type: string, format: uuid }
     JobId:
       name: job_id
       in: path
@@ -551,9 +711,11 @@ components:
       description: |
         Error envelope. Codes: `INVALID_JSON`, `INVALID_QUERY`, `INVALID_REQUEST`,
         `INVALID_GRAPH_ID`, `INVALID_DATA_SOURCE_ID`, `INVALID_JOB_ID`,
+        `INVALID_ENTITY_ID`,
         `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`, `MISSING_FILE`,
         `MISSING_FILENAME`, `INVALID_MULTIPART` (400), `GRAPH_NOT_FOUND`,
-        `DATA_SOURCE_NOT_FOUND`, `JOB_NOT_FOUND`, `ROUTE_NOT_FOUND` (404),
+        `DATA_SOURCE_NOT_FOUND`, `JOB_NOT_FOUND`, `ENTITY_NOT_FOUND`,
+        `ROUTE_NOT_FOUND` (404),
         `METHOD_NOT_ALLOWED` (405), `CONFLICT` (409), `PAYLOAD_TOO_LARGE` (413),
         `UNSUPPORTED_MEDIA_TYPE`, `UNSUPPORTED_FILE_TYPE` (415),
         `VALIDATION_FAILED`, `INVALID_MAPPING` (422), `INTERNAL_ERROR` (500),
@@ -995,3 +1157,116 @@ components:
         configured: { type: boolean }
         provider: { type: string }
         model: { type: string }
+    PropertyValues:
+      type: object
+      description: |
+        Property values as plain JSON: strings, numbers, booleans and string
+        arrays. Datetimes are RFC 3339 strings; integers beyond 2^53 - 1 are
+        decimal strings so no digit is lost. `property_types` says which is
+        which.
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: number
+          - type: boolean
+          - type: array
+            items: { type: string }
+    PropertyTypes:
+      type: object
+      additionalProperties: { $ref: "#/components/schemas/PropertyType" }
+    Entity:
+      type: object
+      required: [id, graph_id, entity_type, properties, property_types]
+      properties:
+        id: { type: string, format: uuid }
+        graph_id: { type: string, format: uuid }
+        entity_type: { type: string }
+        properties: { $ref: "#/components/schemas/PropertyValues" }
+        property_types: { $ref: "#/components/schemas/PropertyTypes" }
+    Relationship:
+      type: object
+      required: [id, graph_id, relationship_type, source_id, target_id, properties, property_types]
+      properties:
+        id: { type: string, format: uuid }
+        graph_id: { type: string, format: uuid }
+        relationship_type: { type: string }
+        source_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        properties: { $ref: "#/components/schemas/PropertyValues" }
+        property_types: { $ref: "#/components/schemas/PropertyTypes" }
+    Subgraph:
+      type: object
+      description: Entities and the relationships among them, ordered by id.
+      required: [entities, relationships]
+      properties:
+        entities:
+          type: array
+          items: { $ref: "#/components/schemas/Entity" }
+        relationships:
+          type: array
+          items: { $ref: "#/components/schemas/Relationship" }
+    GraphPath:
+      type: object
+      description: |
+        `entities` run from the source to the target; `relationships[i]`
+        connects `entities[i]` and `entities[i + 1]` (in either direction).
+        When `found` is false, `hops` is 0 and both arrays are empty.
+      required: [found, hops, entities, relationships]
+      properties:
+        found: { type: boolean }
+        hops: { type: integer, minimum: 0, maximum: 6 }
+        entities:
+          type: array
+          items: { $ref: "#/components/schemas/Entity" }
+        relationships:
+          type: array
+          items: { $ref: "#/components/schemas/Relationship" }
+    EntitySearchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        entity_type:
+          type: string
+          description: Only entities of this type of the active ontology.
+        property_filters:
+          type: object
+          maxProperties: 20
+          description: Property key to exact value, typed by the active ontology.
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: number
+              - type: boolean
+              - type: array
+                items: { type: string }
+        limit: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    EntitySearchResponse:
+      type: object
+      required: [data, count, limit]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Entity" }
+        count:
+          type: integer
+          minimum: 0
+          description: The number of entities returned (not a total).
+        limit: { type: integer, minimum: 1, maximum: 1000 }
+    PathRequest:
+      type: object
+      additionalProperties: false
+      required: [source_id, target_id]
+      properties:
+        source_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        direction: { type: string, enum: [outgoing, incoming, both], default: both }
+        max_depth: { type: integer, minimum: 1, maximum: 6, default: 3 }
+    SubgraphRequest:
+      type: object
+      additionalProperties: false
+      required: [entity_ids]
+      properties:
+        entity_ids:
+          type: array
+          maxItems: 1000
+          items: { type: string, format: uuid }

@@ -273,6 +273,11 @@ function fakeApi(status: GraphBuilderStatus["status"] = "ready"): FakeApi {
         },
       });
     }),
+    searchEntities: vi.fn(),
+    getEntity: vi.fn(),
+    getNeighbors: vi.fn(),
+    findPath: vi.fn(),
+    getSubgraph: vi.fn(),
   };
 }
 
