@@ -33,15 +33,15 @@ mod metadata;
 mod ontology;
 
 pub use ai::{
-    AiError, AiMetadata, AiStatus, AiSuggestion, DisabledGraphBuilderAi, GraphBuilderAi,
-    GraphBuilderRequest, GraphBuilderSuggestion, OntologyContext, RepairContext,
-    SuggestionAnnotations, TypeAnnotation,
+    AiError, AiMetadata, AiStatus, AiSuggestion, DatasetContext, DatasetMapping,
+    DisabledGraphBuilderAi, GraphBuilderAi, GraphBuilderRequest, GraphBuilderSuggestion,
+    OntologyContext, RepairContext, SuggestionAnnotations, TypeAnnotation,
 };
 pub use graph_builder::{
     DEFAULT_AI_JOB_CONCURRENCY, GraphBuilderConfig, GraphBuilderResult, GraphBuilderService,
     MAX_AI_JOB_CONCURRENCY, MAX_REPAIR_ATTEMPTS, MAX_SUGGESTED_ENTITY_TYPES,
     MAX_SUGGESTED_PROPERTIES, MAX_SUGGESTED_RELATIONSHIP_TYPES, MAX_SUGGESTION_TEXT_CHARS,
-    MAX_SUGGESTION_WARNINGS, validate_suggestion,
+    MAX_SUGGESTION_WARNINGS, SuggestionDataset, validate_suggestion,
 };
 
 pub use error::{ApplicationError, BoxError};
@@ -53,7 +53,10 @@ pub use ingestion::{
     DataSourceView, IngestionConfig, IngestionPorts, IngestionService, MAX_BATCH_SIZE,
     MAX_IDEMPOTENCY_KEY_CHARS, PROCESS_RESTARTED, UploadSession,
 };
-pub use jobs::{IngestionJob, JobError, JobKind, JobResult, JobStatus, MAX_JOB_ERROR_CHARS};
+pub use jobs::{
+    IngestionJob, JobError, JobKind, JobResult, JobStatus, MAX_JOB_ERROR_CHARS,
+    MAX_SUGGESTION_DATA_SOURCES,
+};
 pub use memory::MemoryMetadataStore;
 pub use metadata::{DataSourceRecord, LOCAL_WORKSPACE_NAME, MetadataStore, MetadataStoreError};
 pub use ontology::{

@@ -750,7 +750,8 @@ use MCP graph tools
 ## Refinement (M5, approved)
 
 The first internal endpoint is `POST /internal/v1/graph-builder/suggest`
-(one ontology + mapping suggestion per dataset) together with `GET /ready`.
+(one ontology plus one mapping per dataset, for 1–10 datasets modelled
+together; see the ADR-008 refinement) together with `GET /ready`.
 The only provider implementation in v0.1 is a generic OpenAI-compatible
 chat-completions adapter, which also covers local servers (Ollama, vLLM,
 llama.cpp). The validation chain above is implemented as: strict JSON →
@@ -851,6 +852,21 @@ Do not insert graph entities one-by-one when the adapter supports bulk operation
 Each ingestion run gets an ingestion ID.
 
 Repeated requests with the same idempotency key must not silently duplicate graph records.
+
+## Refinement (multi-dataset suggestions, approved)
+
+Users upload several related files at once (customers, transactions,
+devices), so one AI Graph Builder suggestion models 1–10 analysed data
+sources together: one ontology for all of them and one M4 mapping per data
+source. A cross-file relationship lives in the mapping of the file whose
+records hold both identifiers (for example `customer_id` inside
+`devices.csv`), with the other endpoint in `match_only` mode. Rust links
+each mapping to its data source and returns the mappings in a safe
+ingestion order (files that create a type before files that only match
+it); a cycle is a validation error. Ingestion itself is unchanged: one M4
+job per data source, applied in that order after the reviewed ontology is
+saved. The job keeps its first data source in `data_source_id` and lists
+all of them in `ingestion_job_data_sources`.
 
 ---
 

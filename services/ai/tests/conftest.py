@@ -40,21 +40,28 @@ def customers_suggestion() -> dict[str, Any]:
             ],
             "relationship_types": [],
         },
-        "mapping": {
-            "entities": [
-                {
-                    "alias": "customer",
-                    "entity_type": "Customer",
-                    "mode": "create_or_match",
-                    "identity": [{"source_field": "customer_id", "property": "customer_id"}],
-                    "properties": [
-                        {"source_field": "customer_id", "property": "customer_id"},
-                        {"source_field": "name", "property": "name"},
+        "mappings": [
+            {
+                "dataset": "customers.csv",
+                "mapping": {
+                    "entities": [
+                        {
+                            "alias": "customer",
+                            "entity_type": "Customer",
+                            "mode": "create_or_match",
+                            "identity": [
+                                {"source_field": "customer_id", "property": "customer_id"}
+                            ],
+                            "properties": [
+                                {"source_field": "customer_id", "property": "customer_id"},
+                                {"source_field": "name", "property": "name"},
+                            ],
+                        }
                     ],
-                }
-            ],
-            "relationships": [],
-        },
+                    "relationships": [],
+                },
+            }
+        ],
         "confidence": 0.92,
         "annotations": {
             "entities": [
@@ -69,30 +76,35 @@ def customers_suggestion() -> dict[str, Any]:
 def suggest_request(**overrides: Any) -> dict[str, Any]:
     """A valid internal request body (a bounded profile, an empty ontology)."""
     body: dict[str, Any] = {
-        "dataset_profile": {
-            "record_count": 5,
-            "fields": [
-                {
-                    "name": "customer_id",
-                    "inferred_type": "string",
-                    "nullable": False,
-                    "non_null_count": 5,
-                    "sample_values": ["C001", "C002"],
-                },
-                {
-                    "name": "name",
-                    "inferred_type": "string",
-                    "nullable": False,
-                    "non_null_count": 5,
-                    "sample_values": ["Alice Tan"],
-                },
-            ],
-            "sample_rows": [{"customer_id": "C001", "name": "Alice Tan"}],
-        },
+        "datasets": [{"name": "customers.csv", "profile": customers_profile()}],
         "active_ontology": {"version": 1, "entity_types": [], "relationship_types": []},
     }
     body.update(overrides)
     return body
+
+
+def customers_profile() -> dict[str, Any]:
+    """The bounded profile of the fraud example's customers.csv."""
+    return {
+        "record_count": 5,
+        "fields": [
+            {
+                "name": "customer_id",
+                "inferred_type": "string",
+                "nullable": False,
+                "non_null_count": 5,
+                "sample_values": ["C001", "C002"],
+            },
+            {
+                "name": "name",
+                "inferred_type": "string",
+                "nullable": False,
+                "non_null_count": 5,
+                "sample_values": ["Alice Tan"],
+            },
+        ],
+        "sample_rows": [{"customer_id": "C001", "name": "Alice Tan"}],
+    }
 
 
 class FakeProvider:

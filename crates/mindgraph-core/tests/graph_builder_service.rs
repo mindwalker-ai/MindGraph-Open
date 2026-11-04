@@ -193,20 +193,20 @@ fn customers_suggestion() -> Value {
             }],
             "relationship_types": []
         },
-        "mapping": {
-            "entities": [{
-                "alias": "customer",
-                "entity_type": "Customer",
-                "mode": "create_or_match",
-                "identity": [{"source_field": "customer_id", "property": "customer_id"}],
-                "properties": [
-                    {"source_field": "customer_id", "property": "customer_id"},
-                    {"source_field": "name", "property": "name"},
-                    {"source_field": "email", "property": "email"}
-                ]
-            }],
-            "relationships": []
-        },
+        "mappings": [{"dataset": "customers.csv", "mapping": {
+                "entities": [{
+                    "alias": "customer",
+                    "entity_type": "Customer",
+                    "mode": "create_or_match",
+                    "identity": [{"source_field": "customer_id", "property": "customer_id"}],
+                    "properties": [
+                        {"source_field": "customer_id", "property": "customer_id"},
+                        {"source_field": "name", "property": "name"},
+                        {"source_field": "email", "property": "email"}
+                    ]
+                }],
+                "relationships": []
+            }}],
         "confidence": 0.93,
         "annotations": {
             "entities": [{"name": "Customer", "confidence": 0.97,
@@ -236,22 +236,22 @@ fn accounts_suggestion() -> Value {
                 {"name": "OWNS", "source_entity_type": "Customer", "target_entity_type": "Account"}
             ]
         },
-        "mapping": {
-            "entities": [
-                {"alias": "customer", "entity_type": "Customer", "mode": "match_only",
-                 "identity": [{"source_field": "customer_id", "property": "customer_id"}],
-                 "properties": []},
-                {"alias": "account", "entity_type": "Account", "mode": "create_or_match",
-                 "identity": [{"source_field": "account_id", "property": "account_id"}],
-                 "properties": [
-                    {"source_field": "account_id", "property": "account_id"},
-                    {"source_field": "balance", "property": "balance"}
-                 ]}
-            ],
-            "relationships": [
-                {"relationship_type": "OWNS", "source": "customer", "target": "account"}
-            ]
-        },
+        "mappings": [{"dataset": "accounts.csv", "mapping": {
+                "entities": [
+                    {"alias": "customer", "entity_type": "Customer", "mode": "match_only",
+                     "identity": [{"source_field": "customer_id", "property": "customer_id"}],
+                     "properties": []},
+                    {"alias": "account", "entity_type": "Account", "mode": "create_or_match",
+                     "identity": [{"source_field": "account_id", "property": "account_id"}],
+                     "properties": [
+                        {"source_field": "account_id", "property": "account_id"},
+                        {"source_field": "balance", "property": "balance"}
+                     ]}
+                ],
+                "relationships": [
+                    {"relationship_type": "OWNS", "source": "customer", "target": "account"}
+                ]
+            }}],
         "confidence": 0.9,
         "annotations": {
             "entities": [
@@ -283,7 +283,7 @@ async fn generate(
             app.graph_id,
             source,
             &format!("ingest-{source}"),
-            suggestion.mapping.clone(),
+            suggestion.mappings[0].mapping.clone(),
         )
         .await
         .unwrap();
@@ -310,7 +310,7 @@ async fn first_dataset_suggestion_is_validated_and_generates_a_graph() {
 
     let job = app
         .builder
-        .start_suggestion(app.graph_id, source, "suggest-1")
+        .start_suggestion(app.graph_id, &[source], "suggest-1")
         .await
         .unwrap();
     assert_eq!(
@@ -341,9 +341,16 @@ async fn first_dataset_suggestion_is_validated_and_generates_a_graph() {
     // What the AI received: the bounded profile and the pinned ontology.
     let request = app.ai.request(0);
     assert_eq!(request.correlation_id, job.id.to_string());
+    assert_eq!(request.datasets.len(), 1);
+    assert_eq!(request.datasets[0].name, "customers.csv");
     assert_eq!(
-        request.dataset_profile.field_names(),
+        request.datasets[0].profile.field_names(),
         ["customer_id", "name", "email"]
+    );
+    assert_eq!(
+        result.suggestion.mappings[0].data_source_id,
+        Some(source),
+        "Rust links each mapping to its data source"
     );
     assert_eq!(request.active_ontology.version, 1);
     assert!(request.active_ontology.definition.entity_types.is_empty());
@@ -367,7 +374,7 @@ async fn second_dataset_reuses_existing_customers_with_match_only() {
     app.ai.respond(suggestion(customers_suggestion()));
     let first = app
         .builder
-        .start_suggestion(app.graph_id, customers, "s1")
+        .start_suggestion(app.graph_id, &[customers], "s1")
         .await
         .unwrap();
     let first = wait(&app, first.id).await;
@@ -382,7 +389,7 @@ async fn second_dataset_reuses_existing_customers_with_match_only() {
     app.ai.respond(suggestion(accounts_suggestion()));
     let job = app
         .builder
-        .start_suggestion(app.graph_id, accounts, "s2")
+        .start_suggestion(app.graph_id, &[accounts], "s2")
         .await
         .unwrap();
     assert_eq!(job.ontology_version, Some(OntologyVersion::new(2).unwrap()));
@@ -435,26 +442,26 @@ async fn preflight_rejects_bad_requests_before_a_job_or_provider_call() {
     let pending = upload(&app, "customers.csv", CUSTOMERS).await;
     assert!(matches!(
         app.builder
-            .start_suggestion(app.graph_id, pending, "k")
+            .start_suggestion(app.graph_id, &[pending], "k")
             .await,
         Err(ApplicationError::Conflict(_))
     ));
     assert!(matches!(
         app.builder
-            .start_suggestion(app.graph_id, DataSourceId::new(), "k")
+            .start_suggestion(app.graph_id, &[DataSourceId::new()], "k")
             .await,
         Err(ApplicationError::DataSourceNotFound(_))
     ));
     assert!(matches!(
         app.builder
-            .start_suggestion(GraphId::new(), pending, "k")
+            .start_suggestion(GraphId::new(), &[pending], "k")
             .await,
         Err(ApplicationError::GraphNotFound(_))
     ));
     for key in ["", "has space"] {
         assert!(matches!(
             app.builder
-                .start_suggestion(app.graph_id, pending, key)
+                .start_suggestion(app.graph_id, &[pending], key)
                 .await,
             Err(ApplicationError::InvalidRequest(_))
         ));
@@ -482,7 +489,9 @@ async fn sources_of_another_graph_are_not_found() {
         .await
         .unwrap();
     assert!(matches!(
-        app.builder.start_suggestion(other.id(), source, "k").await,
+        app.builder
+            .start_suggestion(other.id(), &[source], "k")
+            .await,
         Err(ApplicationError::DataSourceNotFound(_))
     ));
 }
@@ -494,14 +503,14 @@ async fn disabled_or_unreachable_ai_is_reported_before_scheduling() {
     *app.ai.status.lock().unwrap() = AiStatus::NotConfigured;
     assert!(matches!(
         app.builder
-            .start_suggestion(app.graph_id, source, "k")
+            .start_suggestion(app.graph_id, &[source], "k")
             .await,
         Err(ApplicationError::AiNotConfigured)
     ));
     *app.ai.status.lock().unwrap() = AiStatus::Unavailable;
     assert!(matches!(
         app.builder
-            .start_suggestion(app.graph_id, source, "k")
+            .start_suggestion(app.graph_id, &[source], "k")
             .await,
         Err(ApplicationError::AiUnavailable)
     ));
@@ -515,13 +524,13 @@ async fn idempotency_keys_return_the_same_job_without_another_provider_call() {
     app.ai.respond(suggestion(customers_suggestion()));
     let first = app
         .builder
-        .start_suggestion(app.graph_id, source, "same")
+        .start_suggestion(app.graph_id, &[source], "same")
         .await
         .unwrap();
     wait(&app, first.id).await;
     let again = app
         .builder
-        .start_suggestion(app.graph_id, source, "same")
+        .start_suggestion(app.graph_id, &[source], "same")
         .await
         .unwrap();
     assert_eq!(again.id, first.id);
@@ -531,7 +540,7 @@ async fn idempotency_keys_return_the_same_job_without_another_provider_call() {
     let other_source = analysed(&app, "more.csv", CUSTOMERS).await;
     assert!(matches!(
         app.builder
-            .start_suggestion(app.graph_id, other_source, "same")
+            .start_suggestion(app.graph_id, &[other_source], "same")
             .await,
         Err(ApplicationError::Conflict(_))
     ));
@@ -543,12 +552,17 @@ async fn idempotency_keys_return_the_same_job_without_another_provider_call() {
         .await
         .unwrap();
     app.ingestion
-        .start_ingestion(app.graph_id, source, "ingest-key", reviewed.mapping)
+        .start_ingestion(
+            app.graph_id,
+            source,
+            "ingest-key",
+            reviewed.mappings[0].mapping.clone(),
+        )
         .await
         .unwrap();
     assert!(matches!(
         app.builder
-            .start_suggestion(app.graph_id, source, "ingest-key")
+            .start_suggestion(app.graph_id, &[source], "ingest-key")
             .await,
         Err(ApplicationError::Conflict(_))
     ));
@@ -562,13 +576,14 @@ async fn invalid_suggestions_fail_after_one_repair_attempt() {
     let mut bad_name = customers_suggestion();
     bad_name["ontology"]["entity_types"][0]["name"] = json!("Customer Record");
     let mut bad_mapping = customers_suggestion();
-    bad_mapping["mapping"]["entities"][0]["properties"][1]["source_field"] = json!("full_name");
+    bad_mapping["mappings"][0]["mapping"]["entities"][0]["properties"][1]["source_field"] =
+        json!("full_name");
     app.ai.respond(suggestion(bad_name));
     app.ai.respond(suggestion(bad_mapping));
 
     let job = app
         .builder
-        .start_suggestion(app.graph_id, source, "k")
+        .start_suggestion(app.graph_id, &[source], "k")
         .await
         .unwrap();
     let done = wait(&app, job.id).await;
@@ -596,14 +611,14 @@ async fn a_repair_can_fix_a_suggestion() {
     let app = app().await;
     let source = analysed(&app, "customers.csv", CUSTOMERS).await;
     let mut unmapped_identity = customers_suggestion();
-    unmapped_identity["mapping"]["entities"][0]["properties"] =
+    unmapped_identity["mappings"][0]["mapping"]["entities"][0]["properties"] =
         json!([{"source_field": "name", "property": "name"}]);
     app.ai.respond(suggestion(unmapped_identity));
     app.ai.respond(suggestion(customers_suggestion()));
 
     let job = app
         .builder
-        .start_suggestion(app.graph_id, source, "k")
+        .start_suggestion(app.graph_id, &[source], "k")
         .await
         .unwrap();
     let done = wait(&app, job.id).await;
@@ -633,7 +648,7 @@ async fn zero_repair_attempts_fail_immediately() {
     app.ai.respond(suggestion(bad));
     let job = app
         .builder
-        .start_suggestion(app.graph_id, source, "k")
+        .start_suggestion(app.graph_id, &[source], "k")
         .await
         .unwrap();
     let done = wait(&app, job.id).await;
@@ -653,7 +668,7 @@ async fn destructive_changes_to_the_existing_ontology_are_rejected() {
     let mut cases: Vec<(Value, &str)> = Vec::new();
     let mut removed = accounts_suggestion();
     removed["ontology"]["relationship_types"] = json!([]);
-    removed["mapping"]["relationships"] = json!([]);
+    removed["mappings"][0]["mapping"]["relationships"] = json!([]);
     cases.push((removed, "existing relationship type `OWNS` must be kept"));
     let mut retyped = accounts_suggestion();
     retyped["ontology"]["entity_types"][1]["properties"][1]["type"] = json!("integer");
@@ -678,7 +693,7 @@ async fn destructive_changes_to_the_existing_ontology_are_rejected() {
         app.ai.respond(suggestion(case));
         let job = app
             .builder
-            .start_suggestion(app.graph_id, accounts, &format!("destructive-{index}"))
+            .start_suggestion(app.graph_id, &[accounts], &format!("destructive-{index}"))
             .await
             .unwrap();
         let error = wait(&app, job.id).await.error.expect("rejected");
@@ -713,7 +728,7 @@ async fn provider_failures_fail_the_job_with_their_category() {
         app.ai.fail(error);
         let job = app
             .builder
-            .start_suggestion(app.graph_id, source, &format!("fail-{index}"))
+            .start_suggestion(app.graph_id, &[source], &format!("fail-{index}"))
             .await
             .unwrap();
         let done = wait(&app, job.id).await;
@@ -737,7 +752,7 @@ async fn suggestions_keep_their_pinned_ontology_version() {
     app.ai.respond(suggestion(customers_suggestion()));
     let job = app
         .builder
-        .start_suggestion(app.graph_id, source, "k")
+        .start_suggestion(app.graph_id, &[source], "k")
         .await
         .unwrap();
     // While the AI "thinks", someone activates version 2 with other types.
@@ -779,7 +794,7 @@ async fn slow_ai_jobs_do_not_hold_up_dataset_jobs() {
         app.ai.respond(suggestion(customers_suggestion()));
         stuck.push(
             app.builder
-                .start_suggestion(app.graph_id, source, key)
+                .start_suggestion(app.graph_id, &[source], key)
                 .await
                 .unwrap(),
         );
@@ -802,7 +817,7 @@ async fn restart_recovery_includes_ai_jobs() {
     let source = analysed(&app, "customers.csv", CUSTOMERS).await;
     let job = IngestionJob::graph_builder(
         app.graph_id,
-        source,
+        vec![source],
         OntologyVersion::INITIAL,
         "stuck".into(),
         chrono::Utc::now(),
@@ -837,4 +852,185 @@ async fn too_many_repair_attempts_are_rejected() {
         },
     );
     assert!(matches!(result, Err(ApplicationError::InvalidRequest(_))));
+}
+
+/// One suggestion for both files, listed in the wrong order: `accounts.csv`
+/// only matches the customers that `customers.csv` creates.
+fn both_datasets_suggestion() -> Value {
+    let mut both = accounts_suggestion();
+    let customers = customers_suggestion()["mappings"][0].clone();
+    both["mappings"].as_array_mut().unwrap().push(customers);
+    both
+}
+
+#[tokio::test]
+async fn several_datasets_are_modelled_together_in_a_safe_order() {
+    let app = app().await;
+    let accounts = analysed(&app, "accounts.csv", ACCOUNTS).await;
+    let customers = analysed(&app, "customers.csv", CUSTOMERS).await;
+    app.ai.respond(suggestion(both_datasets_suggestion()));
+    let job = app
+        .builder
+        .start_suggestion(app.graph_id, &[accounts, customers], "both")
+        .await
+        .unwrap();
+    assert_eq!(job.data_source_ids, [accounts, customers]);
+    let done = wait(&app, job.id).await;
+    assert_eq!(done.status, JobStatus::Completed, "{:?}", done.error);
+    assert_eq!(done.data_source_ids, [accounts, customers]);
+
+    let request = app.ai.request(0);
+    let names: Vec<&str> = request.datasets.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["accounts.csv", "customers.csv"],
+        "the client's order"
+    );
+
+    // Creators first: customers.csv creates the Customer accounts.csv matches.
+    let mappings = &done.graph_builder_result().unwrap().suggestion.mappings;
+    let order: Vec<(&str, Option<DataSourceId>)> = mappings
+        .iter()
+        .map(|m| (m.dataset.as_str(), m.data_source_id))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("customers.csv", Some(customers)),
+            ("accounts.csv", Some(accounts))
+        ]
+    );
+
+    // Applied in that order, the cross-file relationship resolves.
+    let suggestion = &done.graph_builder_result().unwrap().suggestion;
+    app.ontology
+        .create_version(app.graph_id, &suggestion.ontology)
+        .await
+        .unwrap();
+    for mapping in &suggestion.mappings {
+        let source = mapping.data_source_id.unwrap();
+        let job = app
+            .ingestion
+            .start_ingestion(
+                app.graph_id,
+                source,
+                &format!("ingest-{source}"),
+                mapping.mapping.clone(),
+            )
+            .await
+            .unwrap();
+        let job = wait(&app, job.id).await;
+        assert_eq!(job.status, JobStatus::Completed, "{:?}", job.error);
+    }
+    assert_eq!(count(&app, "Customer").await, 2);
+    assert_eq!(count(&app, "Account").await, 3);
+}
+
+#[tokio::test]
+async fn every_dataset_needs_exactly_one_mapping() {
+    let app = app_with(
+        FakeAi::ready(),
+        GraphBuilderConfig {
+            max_repair_attempts: 0,
+            ..GraphBuilderConfig::default()
+        },
+    )
+    .await;
+    let accounts = analysed(&app, "accounts.csv", ACCOUNTS).await;
+    let customers = analysed(&app, "customers.csv", CUSTOMERS).await;
+    let mut missing = both_datasets_suggestion();
+    missing["mappings"].as_array_mut().unwrap().pop();
+    let mut unknown = both_datasets_suggestion();
+    unknown["mappings"][1]["dataset"] = json!("orders.csv");
+    let mut duplicate = both_datasets_suggestion();
+    duplicate["mappings"][1]["dataset"] = json!("accounts.csv");
+    let mut never_created = both_datasets_suggestion();
+    // customers.csv now only matches the Customer that nobody creates.
+    never_created["mappings"][1]["mapping"]["entities"][0]["mode"] = json!("match_only");
+    never_created["mappings"][1]["mapping"]["entities"][0]["properties"] = json!([]);
+    for (index, (bad, expected)) in [
+        (missing, "dataset `customers.csv` needs a mapping"),
+        (unknown, "`orders.csv` is not one of the datasets"),
+        (
+            duplicate,
+            "dataset `accounts.csv` has more than one mapping",
+        ),
+        (never_created, "entity type `Customer` is only matched"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        app.ai.respond(suggestion(bad));
+        let job = app
+            .builder
+            .start_suggestion(
+                app.graph_id,
+                &[accounts, customers],
+                &format!("bad-{index}"),
+            )
+            .await
+            .unwrap();
+        let done = wait(&app, job.id).await;
+        assert_eq!(done.status, JobStatus::Failed);
+        let error = done.error.unwrap();
+        assert_eq!(error.code, "AI_VALIDATION_FAILED");
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}
+
+#[tokio::test]
+async fn data_source_lists_are_validated_and_replayed_exactly() {
+    let app = app().await;
+    let accounts = analysed(&app, "accounts.csv", ACCOUNTS).await;
+    let customers = analysed(&app, "customers.csv", CUSTOMERS).await;
+    let too_many = [accounts; 11];
+    for ids in [&[][..], &[accounts, accounts][..], &too_many[..]] {
+        assert!(matches!(
+            app.builder.start_suggestion(app.graph_id, ids, "k").await,
+            Err(ApplicationError::InvalidRequest(_))
+        ));
+    }
+    app.ai.respond(suggestion(both_datasets_suggestion()));
+    let first = app
+        .builder
+        .start_suggestion(app.graph_id, &[accounts, customers], "same")
+        .await
+        .unwrap();
+    let again = app
+        .builder
+        .start_suggestion(app.graph_id, &[accounts, customers], "same")
+        .await
+        .unwrap();
+    assert_eq!(again.id, first.id);
+    for other in [&[customers, accounts][..], &[accounts][..]] {
+        assert!(matches!(
+            app.builder
+                .start_suggestion(app.graph_id, other, "same")
+                .await,
+            Err(ApplicationError::Conflict(_))
+        ));
+    }
+    wait(&app, first.id).await;
+}
+
+#[tokio::test]
+async fn same_filenames_get_distinct_labels() {
+    let app = app().await;
+    let a = analysed(&app, "customers.csv", CUSTOMERS).await;
+    let b = analysed(&app, "customers.csv", CUSTOMERS).await;
+    app.ai.fail(AiError::Timeout);
+    let job = app
+        .builder
+        .start_suggestion(app.graph_id, &[a, b], "twins")
+        .await
+        .unwrap();
+    wait(&app, job.id).await;
+    let names: Vec<String> = app
+        .ai
+        .request(0)
+        .datasets
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(names, ["customers.csv", "customers.csv (2)"]);
 }

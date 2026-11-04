@@ -22,6 +22,9 @@ use mindgraph_ingestion::{IngestionMapping, IngestionSummary};
 
 use crate::GraphBuilderResult;
 
+/// Largest number of data sources one AI suggestion may model together.
+pub const MAX_SUGGESTION_DATA_SOURCES: usize = 10;
+
 /// What a job does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobKind {
@@ -179,9 +182,14 @@ pub struct IngestionJob {
     pub id: IngestionJobId,
     /// The graph the job belongs to.
     pub graph_id: GraphId,
-    /// The data source it reads.
+    /// The data source it reads; for an AI suggestion over several data
+    /// sources, the first of [`Self::data_source_ids`].
     pub data_source_id: DataSourceId,
-    /// Analysis or ingestion.
+    /// Every data source the job reads, in order: `[data_source_id]` for
+    /// analysis and ingestion, `1..=MAX_SUGGESTION_DATA_SOURCES` distinct
+    /// data sources for an AI suggestion.
+    pub data_source_ids: Vec<DataSourceId>,
+    /// Analysis, ingestion or AI suggestion.
     pub kind: JobKind,
     /// The lifecycle state.
     pub status: JobStatus,
@@ -214,6 +222,7 @@ impl IngestionJob {
             id: IngestionJobId::new(),
             graph_id,
             data_source_id,
+            data_source_ids: vec![data_source_id],
             kind: JobKind::Analyze,
             status: JobStatus::Queued,
             progress: 0.0,
@@ -246,21 +255,30 @@ impl IngestionJob {
         }
     }
 
-    /// A queued AI Graph Builder job whose suggestion builds on
-    /// `ontology_version` (pinned).
+    /// A queued AI Graph Builder job over `data_source_ids` whose suggestion
+    /// builds on `ontology_version` (pinned).
+    ///
+    /// # Panics
+    ///
+    /// If `data_source_ids` is empty; [`Self::validate_new`] checks the
+    /// other bounds.
     #[must_use]
     pub fn graph_builder(
         graph_id: GraphId,
-        data_source_id: DataSourceId,
+        data_source_ids: Vec<DataSourceId>,
         ontology_version: OntologyVersion,
         idempotency_key: String,
         now: DateTime<Utc>,
     ) -> Self {
+        let first = *data_source_ids
+            .first()
+            .expect("an AI suggestion reads at least one data source");
         Self {
             kind: JobKind::AiSuggest,
+            data_source_ids,
             ontology_version: Some(ontology_version),
             idempotency_key: Some(idempotency_key),
-            ..Self::analysis(graph_id, data_source_id, now)
+            ..Self::analysis(graph_id, first, now)
         }
     }
 
@@ -299,6 +317,21 @@ impl IngestionJob {
             || self.result.is_some()
         {
             return invalid("new jobs must be queued with no progress, error or result");
+        }
+        if self.data_source_ids.first() != Some(&self.data_source_id) {
+            return invalid("the first data source must be `data_source_id`");
+        }
+        let distinct: std::collections::HashSet<_> = self.data_source_ids.iter().collect();
+        if distinct.len() != self.data_source_ids.len() {
+            return invalid("data sources must be distinct");
+        }
+        let max_sources = if self.kind == JobKind::AiSuggest {
+            MAX_SUGGESTION_DATA_SOURCES
+        } else {
+            1
+        };
+        if self.data_source_ids.len() > max_sources {
+            return invalid("too many data sources for this job kind");
         }
         match self.kind {
             JobKind::Ingest if self.ontology_version.is_none() || self.mapping.is_none() => {

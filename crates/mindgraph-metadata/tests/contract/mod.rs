@@ -7,9 +7,9 @@
 
 use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
 use mindgraph_core::{
-    GraphBuilderResult, GraphBuilderSuggestion, IngestionJob, JobError, JobKind, JobResult,
-    JobStatus, MetadataStore, MetadataStoreError, OntologyDefinition, SuggestionAnnotations,
-    TypeAnnotation,
+    DatasetMapping, GraphBuilderResult, GraphBuilderSuggestion, IngestionJob, JobError, JobKind,
+    JobResult, JobStatus, MetadataStore, MetadataStoreError, OntologyDefinition,
+    SuggestionAnnotations, TypeAnnotation,
 };
 use mindgraph_domain::{
     DataSource, DataSourceId, DataSourceKind, DataSourceStatus, EntityType, EntityTypeId, GraphId,
@@ -56,6 +56,7 @@ macro_rules! metadata_store_contract {
             idempotency_keys_are_unique_per_graph,
             incomplete_jobs_are_failed_on_recovery,
             ai_suggest_jobs_round_trip_with_their_result,
+            ai_suggest_jobs_keep_their_data_sources_in_order,
             results_must_match_the_job_kind,
         );
     };
@@ -907,7 +908,7 @@ pub async fn incomplete_jobs_are_failed_on_recovery(store: &dyn MetadataStore) {
     assert_eq!(store.mark_incomplete_jobs_failed(&error).await.unwrap(), 0);
 }
 
-fn graph_builder_result() -> GraphBuilderResult {
+fn graph_builder_result(source: DataSourceId) -> GraphBuilderResult {
     GraphBuilderResult {
         prompt_version: "graph_builder_v1".into(),
         provider: "openai_compatible".into(),
@@ -924,7 +925,11 @@ fn graph_builder_result() -> GraphBuilderResult {
                 "relationship_types": []
             }))
             .unwrap(),
-            mapping: mapping(),
+            mappings: vec![DatasetMapping {
+                dataset: "customers.csv".into(),
+                data_source_id: Some(source),
+                mapping: mapping(),
+            }],
             confidence: 0.92,
             annotations: SuggestionAnnotations {
                 entities: vec![TypeAnnotation {
@@ -944,7 +949,7 @@ pub async fn ai_suggest_jobs_round_trip_with_their_result(store: &dyn MetadataSt
     let (graph, source) = graph_with_source(store).await;
     let job = IngestionJob::graph_builder(
         graph.id(),
-        source.id(),
+        vec![source.id()],
         OntologyVersion::INITIAL,
         "suggest-1".into(),
         now(),
@@ -969,16 +974,19 @@ pub async fn ai_suggest_jobs_round_trip_with_their_result(store: &dyn MetadataSt
     );
 
     store.start_job(job.id).await.unwrap();
-    let result = JobResult::GraphBuilder(Box::new(graph_builder_result()));
+    let result = JobResult::GraphBuilder(Box::new(graph_builder_result(source.id())));
     let done = store.complete_job(job.id, Some(&result)).await.unwrap();
     assert_eq!(done.result, Some(result.clone()));
     let stored = store.get_job(job.id).await.unwrap().unwrap();
-    assert_eq!(stored.graph_builder_result(), Some(&graph_builder_result()));
+    assert_eq!(
+        stored.graph_builder_result(),
+        Some(&graph_builder_result(source.id()))
+    );
 
     // An AI suggestion job needs a pinned version and a key, and no mapping.
     let mut unpinned = IngestionJob::graph_builder(
         graph.id(),
-        source.id(),
+        vec![source.id()],
         OntologyVersion::INITIAL,
         "suggest-2".into(),
         now(),
@@ -997,12 +1005,91 @@ pub async fn ai_suggest_jobs_round_trip_with_their_result(store: &dyn MetadataSt
     ));
 }
 
+pub async fn ai_suggest_jobs_keep_their_data_sources_in_order(store: &dyn MetadataStore) {
+    let (graph, first) = graph_with_source(store).await;
+    let second = data_source(graph.id(), "accounts.csv");
+    store
+        .create_data_source(&second, &format!("sources/{}/source", second.id()))
+        .await
+        .unwrap();
+    let job = IngestionJob::graph_builder(
+        graph.id(),
+        vec![second.id(), first.id()],
+        OntologyVersion::INITIAL,
+        "both".into(),
+        now(),
+    );
+    store.create_job(&job).await.unwrap();
+    let stored = store.get_job(job.id).await.unwrap().unwrap();
+    assert_eq!(stored.data_source_ids, [second.id(), first.id()]);
+    assert_eq!(stored.data_source_id, second.id());
+    store.start_job(job.id).await.unwrap();
+    let running = store
+        .find_job_by_idempotency_key(graph.id(), "both")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.data_source_ids, [second.id(), first.id()]);
+
+    // A data source of another graph is not found; nothing is stored.
+    let (other_graph, foreign) = {
+        let workspace = store.ensure_local_workspace().await.unwrap();
+        let other = graph_at(workspace.id(), "Other", now());
+        create(store, &other).await;
+        let foreign = data_source(other.id(), "foreign.csv");
+        store
+            .create_data_source(&foreign, &format!("sources/{}/source", foreign.id()))
+            .await
+            .unwrap();
+        (other, foreign)
+    };
+    assert_ne!(other_graph.id(), graph.id());
+    let mixed = IngestionJob::graph_builder(
+        graph.id(),
+        vec![first.id(), foreign.id()],
+        OntologyVersion::INITIAL,
+        "mixed".into(),
+        now(),
+    );
+    assert!(matches!(
+        store.create_job(&mixed).await,
+        Err(MetadataStoreError::NotFound(_))
+    ));
+    assert!(store.get_job(mixed.id).await.unwrap().is_none());
+
+    // Duplicates, too many sources, and several sources for other kinds.
+    let duplicate = IngestionJob::graph_builder(
+        graph.id(),
+        vec![first.id(), first.id()],
+        OntologyVersion::INITIAL,
+        "dup".into(),
+        now(),
+    );
+    let mut eleven = vec![first.id()];
+    eleven.extend((0..10).map(|_| DataSourceId::new()));
+    let too_many = IngestionJob::graph_builder(
+        graph.id(),
+        eleven,
+        OntologyVersion::INITIAL,
+        "many".into(),
+        now(),
+    );
+    let mut analysis = IngestionJob::analysis(graph.id(), first.id(), now());
+    analysis.data_source_ids.push(second.id());
+    for invalid in [duplicate, too_many, analysis] {
+        assert!(matches!(
+            store.create_job(&invalid).await,
+            Err(MetadataStoreError::InvalidInput(_))
+        ));
+    }
+}
+
 pub async fn results_must_match_the_job_kind(store: &dyn MetadataStore) {
     let (graph, source) = graph_with_source(store).await;
     let job = ingestion(graph.id(), source.id(), "k");
     store.create_job(&job).await.unwrap();
     store.start_job(job.id).await.unwrap();
-    let wrong = JobResult::GraphBuilder(Box::new(graph_builder_result()));
+    let wrong = JobResult::GraphBuilder(Box::new(graph_builder_result(source.id())));
     assert!(matches!(
         store.complete_job(job.id, Some(&wrong)).await,
         Err(MetadataStoreError::InvalidInput(_))

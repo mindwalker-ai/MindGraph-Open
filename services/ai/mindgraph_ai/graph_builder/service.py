@@ -53,13 +53,14 @@ class GraphBuilderService:
         def log(outcome: str) -> None:
             logger.info(
                 "graph builder suggestion outcome=%s provider=%s model=%s prompt_version=%s "
-                "field_count=%d record_count=%d repair=%s duration_ms=%d",
+                "dataset_count=%d field_count=%d record_count=%d repair=%s duration_ms=%d",
                 outcome,
                 provider.name,
                 provider.model,
                 PROMPT_VERSION,
-                len(request.dataset_profile.fields),
-                request.dataset_profile.record_count,
+                len(request.datasets),
+                sum(len(dataset.profile.fields) for dataset in request.datasets),
+                sum(dataset.profile.record_count for dataset in request.datasets),
                 request.repair is not None,
                 (time.monotonic() - started) * 1000,
             )

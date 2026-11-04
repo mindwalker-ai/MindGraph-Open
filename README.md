@@ -50,20 +50,24 @@ starts with an empty, active ontology v1. (Port 8080 already taken? Set
 
 ### Build a graph in the browser (M5)
 
-Open **http://localhost:3000**, create a graph and click **Graph Builder**:
+Open **http://localhost:3000**:
 
 ```text
-1 Data      upload a CSV or JSON file
-2 Analyze   inferred field types, nullability and sample values
-3 AI Model  "Generate Graph Model" (AI) or "Build manually"
-4 Review    entities, relationships and mappings: edit, delete, add
-5 Generate  "Generate Graph": saves the ontology, runs the M4 ingestion
+Create a Graph    name it; start from CSV, JSON or an empty ontology
+Upload Data       drop several files; each is parsed (rows, columns, headers)
+AI Graph Builder  "Generate Graph Model": one model for all files, linked across
+                  files by shared identifiers (or "Build manually")
+                  review on a canvas: entity types, relationships, YAML view;
+                  edit names, properties, source fields, modes and endpoints
+Generate          saves the ontology, then ingests each file, creators first
 ```
 
-The AI only *suggests*. The uploaded file, its analysis profile and the
+The AI only *suggests*. The uploaded files, their analysis profiles and the
 suggestion are stored as you go, but no ontology version and no graph data
 are written until you click **Generate Graph**, which uses the same
-endpoints as the curl examples below. Without an
+endpoints as the curl examples below. Screens of later milestones (Graph
+Explorer, Ask, GraphRAG, MCP, templates, the demo) are shown in the
+navigation but disabled until they ship. Without an
 AI provider the builder says so and the manual path works the same way. See
 [Use the AI Graph Builder (M5)](#use-the-ai-graph-builder-m5) to configure a
 model.
@@ -156,7 +160,7 @@ endpoints are listed in [`docs/api/`](docs/api/README.md).
 ## Repository layout
 
 ```text
-apps/web/                   Next.js frontend (placeholder until M6)
+apps/web/                   Next.js frontend: home, create, upload, AI Graph Builder
 crates/
   mindgraph-domain/         Infrastructure-free domain model (M1)
   mindgraph-core/           Application layer: use cases, MetadataStore port
@@ -310,39 +314,51 @@ bridge; check yours with `ip addr show docker0`), not to `0.0.0.0`, and keep
 port 11434 closed in your firewall so only local containers can reach it.
 
 Leave `MINDGRAPH_LLM_PROVIDER` empty to disable AI; every manual flow keeps
-working. With the API (continuing the M4 example above, after `customers.csv`
-is analysed):
+working. With the API (continuing the M4 example above: `$CUSTOMERS` and
+`$ACCOUNTS` are two analysed data sources):
 
 ```bash
 curl -s $API/graph-builder/status | jq .                   # {"status": "ready", ...}
-JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/graph-builder/suggestions \
-  -H "Idempotency-Key: $(uuidgen)" | jq -r .job_id)
+# One suggestion for several files (1-10); the shorthand
+# POST .../data-sources/$SOURCE/graph-builder/suggestions models a single file.
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/graph-builder/suggestions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" \
+  -d "{\"data_source_ids\": [\"$CUSTOMERS\", \"$ACCOUNTS\"]}" | jq -r .job_id)
 curl -N $API/jobs/$JOB/events                              # ends with "event: completed"
 curl -s $API/jobs/$JOB | jq '.result.suggestion | {entities: [.ontology.entity_types[].name],
-  modes: [.mapping.entities[] | {alias, mode}], confidence, warnings}'
+  files: [.mappings[] | {dataset, modes: [.mapping.entities[] | {alias, mode}]}],
+  confidence, warnings}'
 
 # Review it, then apply it with the M4 endpoints. expected_version makes the
 # ontology write fail with 409 if another version became active meanwhile
 # (the body is a complete ontology, so a stale one would drop newer types):
 curl -s $API/jobs/$JOB | jq '.result | .suggestion.ontology + {expected_version: .ontology_version_base}' > ontology.json
-curl -s $API/jobs/$JOB | jq '{mapping: .result.suggestion.mapping}' > mapping.json
-# --fail-with-body stops here on 409 (or any error), so the mapping is never
+# --fail-with-body stops here on 409 (or any error), so no mapping is ever
 # ingested against an ontology this example did not save:
 curl -s --fail-with-body -X POST $API/graphs/$GRAPH/ontology \
   -H "Content-Type: application/json" -d @ontology.json \
-&& curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
-  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" -d @mapping.json
+&& curl -s $API/jobs/$JOB | jq -c '.result.suggestion.mappings[]' | while read -r m; do
+  # The mappings come in a safe order: files that create a type first.
+  SOURCE=$(jq -r .data_source_id <<<"$m")
+  ING=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+    -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" \
+    -d "$(jq '{mapping: .mapping}' <<<"$m")" | jq -r .job_id)
+  curl -sN $API/jobs/$ING/events | grep -m1 -E 'event: (completed|failed)'
+done
 ```
 
-For `accounts.csv` after `Customer` exists, a good suggestion keeps
-`Customer` (marked `existing`), adds `Account` and `Customer ─OWNS→ Account`,
-and maps the customer column with `mode: match_only` so existing customers
-are reused.
+For `customers.csv` and `accounts.csv` together, a good suggestion has one
+`Customer` type created from `customers.csv`, an `Account` type, and
+`Customer ─OWNS→ Account` in the `accounts.csv` mapping, whose customer
+column uses `mode: match_only`, so accounts link to the customers of the
+other file. The same works one file at a time: a later suggestion keeps
+existing types (marked `existing`) and matches them.
 
-**What the model receives** when you request a suggestion: field names,
-inferred types, null counts, up to 5 sample values per field, up to 10
-sample rows, and the graph's current ontology. Never the file, the other
-records, graph contents, paths or MindGraph's own credentials. Sample values
+**What the model receives** when you request a suggestion, per file: its
+filename as a label, field names, inferred types, null counts, up to 5
+sample values per field and up to 10 sample rows; plus the graph's current
+ontology. Never the files, other records, graph contents, paths or
+MindGraph's own credentials. Sample values
 are copied from your data unfiltered, so they can contain sensitive values
 (passwords, tokens, personal data) if your dataset does: use a local model
 for such data. Sample values are treated as untrusted data in the prompt; the model has no tools, and every answer is
