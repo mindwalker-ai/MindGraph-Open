@@ -7,12 +7,13 @@ export const metadata: Metadata = { title: "Graph Explorer · MindGraph" };
 
 async function Explorer({ params, searchParams }: PageProps<"/graphs/[graphId]/explore">) {
   const { graphId } = await params;
-  const { entity } = await searchParams;
+  const { entity, ask } = await searchParams;
   return (
     <GraphExplorer
       key={graphId}
       graphId={graphId}
       initialEntityId={typeof entity === "string" && entity ? entity : undefined}
+      initialPanel={ask === "1" ? "ask" : "details"}
     />
   );
 }

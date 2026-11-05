@@ -119,4 +119,25 @@ describe("createApiClient", () => {
       ["/api/v1/graphs/g1/subgraph", "POST", { entity_ids: ["a", "b"] }],
     ]);
   });
+
+  it("asks questions with a scope and reads the GraphRAG status", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(reply(200, { status: "answered" }))
+      .mockResolvedValueOnce(reply(200, { status: "not_configured", configured: false }));
+    const api = createApiClient("", fetcher);
+    await api.ask("g1", {
+      question: "Who shares a device?",
+      scope: { mode: "selected_entities", entity_ids: ["e1"] },
+    });
+    await expect(api.graphRagStatus()).resolves.toMatchObject({ status: "not_configured" });
+    const [url, init] = fetcher.mock.calls[0];
+    expect(url).toBe("/api/v1/graphs/g1/ask");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({
+      question: "Who shares a device?",
+      scope: { mode: "selected_entities", entity_ids: ["e1"] },
+    });
+    expect(fetcher.mock.calls[1][0]).toBe("/api/v1/graphrag/status");
+  });
 });

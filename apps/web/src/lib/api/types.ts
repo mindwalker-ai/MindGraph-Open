@@ -284,3 +284,121 @@ export const EXPLORER_LIMITS = {
   pathMaxDepth: 6,
   subgraphMax: 1000,
 } as const;
+
+// --- Ask MindGraph (M7) -------------------------------------------------------
+
+/** What a question is about: the selected entities, or bounded discovery. */
+export type AskScope =
+  { mode: "selected_entities"; entity_ids: string[] } | { mode: "bounded_graph" };
+
+/**
+ * An earlier question of the conversation, sent with a follow-up. The
+ * browser keeps the conversation; MindGraph Core checks the ids again.
+ */
+export interface AskHistoryTurn {
+  question: string;
+  /** Entities that question was about or cited, most relevant first. */
+  entity_ids: string[];
+}
+
+export interface AskRequest {
+  question: string;
+  scope: AskScope;
+  /** Earlier questions, oldest first (at most `ASK_LIMITS.historyTurns`). */
+  history?: AskHistoryTurn[];
+}
+
+/** How well the retrieved evidence supports the answer. */
+export type AnswerStatus = "answered" | "partial" | "insufficient_evidence";
+
+/** Who wrote the answer: the model, or MindGraph when there was nothing to phrase. */
+export type AnswerSource = "model" | "no_evidence" | "unsupported";
+
+export type EvidenceKind = "entity" | "relationship" | "path";
+
+export interface EvidenceEntity extends Entity {
+  /** `E1`, `E2`, … */
+  ref: string;
+}
+
+export interface EvidenceRelationship extends Relationship {
+  /** `R1`, `R2`, … */
+  ref: string;
+}
+
+export interface EvidencePath {
+  /** `P1`, `P2`, … */
+  ref: string;
+  /** In order; `relationship_ids[i]` connects `entity_ids[i]` and `entity_ids[i + 1]`. */
+  entity_ids: string[];
+  relationship_ids: string[];
+}
+
+/** A citation MindGraph Core checked against the evidence. */
+export interface Citation {
+  ref: string;
+  kind: EvidenceKind;
+  /** The cited entity or relationship id; absent for paths. */
+  id?: string;
+}
+
+/** The validated retrieval plan (descriptive, never executable). */
+export interface PlanSummary {
+  operation: "entity_lookup" | "neighbors" | "find_path" | "shared_neighbor" | "unsupported";
+  source?: string;
+  target?: string;
+  entity_type?: string;
+  shared_entity_type?: string;
+  relationship_type?: string;
+  direction?: Direction;
+  max_depth?: number;
+  reason?: string;
+  notes?: string[];
+}
+
+export interface RetrievalReport {
+  scope: AskScope["mode"];
+  plan: PlanSummary;
+  operations: number;
+  candidates_inspected: number;
+  /** A limit stopped retrieval: the answer may miss results. */
+  truncated: boolean;
+  context_bytes: number;
+  limitations: string[];
+}
+
+export interface AnswerMetadata {
+  interpret_prompt_version: string;
+  synthesize_prompt_version: string | null;
+  provider: string;
+  model: string;
+  /** Earlier questions used as conversation context. */
+  conversation_turns: number;
+  duration_ms: number;
+}
+
+/** `POST /graphs/{id}/ask`: the checked answer and the evidence it rests on. */
+export interface AskResponse {
+  status: AnswerStatus;
+  answer: string;
+  answer_source: AnswerSource;
+  evidence: {
+    entities: EvidenceEntity[];
+    relationships: EvidenceRelationship[];
+    paths: EvidencePath[];
+  };
+  citations: Citation[];
+  warnings: string[];
+  retrieval: RetrievalReport;
+  metadata: AnswerMetadata;
+}
+
+/** Bounds of `POST /graphs/{id}/ask` (`mindgraph-graphrag`). */
+export const ASK_LIMITS = {
+  questionMax: 2000,
+  seedMax: 5,
+  /** Earlier questions a follow-up carries. */
+  historyTurns: 3,
+  /** Entity ids one earlier question carries. */
+  historyTurnEntities: 10,
+} as const;

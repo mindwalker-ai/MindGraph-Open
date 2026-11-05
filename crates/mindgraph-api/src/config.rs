@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mindgraph_core::{
-    DEFAULT_AI_JOB_CONCURRENCY, DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY,
-    DEFAULT_MAX_UPLOAD_BYTES, GraphBuilderConfig, IngestionConfig, MAX_AI_JOB_CONCURRENCY,
-    MAX_BATCH_SIZE, MAX_REPAIR_ATTEMPTS,
+    DEFAULT_AI_JOB_CONCURRENCY, DEFAULT_BATCH_SIZE, DEFAULT_GRAPHRAG_CONCURRENCY,
+    DEFAULT_GRAPHRAG_TIMEOUT, DEFAULT_JOB_CONCURRENCY, DEFAULT_MAX_UPLOAD_BYTES,
+    GraphBuilderConfig, IngestionConfig, MAX_AI_JOB_CONCURRENCY, MAX_BATCH_SIZE,
+    MAX_GRAPHRAG_CONCURRENCY, MAX_GRAPHRAG_TIMEOUT, MAX_REPAIR_ATTEMPTS,
 };
 use mindgraph_ingestion::Limits;
 
@@ -27,6 +28,8 @@ const AI_URL_VAR: &str = "MINDGRAPH_AI_URL";
 const AI_TIMEOUT_VAR: &str = "MINDGRAPH_AI_TIMEOUT_SECONDS";
 const AI_REPAIR_VAR: &str = "MINDGRAPH_AI_MAX_REPAIR_ATTEMPTS";
 const AI_JOB_CONCURRENCY_VAR: &str = "MINDGRAPH_AI_JOB_CONCURRENCY";
+const GRAPHRAG_TIMEOUT_VAR: &str = "MINDGRAPH_GRAPHRAG_TIMEOUT_SECONDS";
+const GRAPHRAG_CONCURRENCY_VAR: &str = "MINDGRAPH_GRAPHRAG_CONCURRENCY";
 
 /// Local-first default: only reachable from this machine. Docker Compose
 /// overrides it with `0.0.0.0:8080` inside the container network.
@@ -70,6 +73,10 @@ pub struct AiSettings {
     pub max_repair_attempts: u32,
     /// AI jobs running at the same time (`1..=8`), on their own workers.
     pub job_concurrency: usize,
+    /// Deadline of one GraphRAG question (`1..=600` seconds).
+    pub graphrag_timeout: Duration,
+    /// GraphRAG questions answered at the same time (`1..=16`).
+    pub graphrag_concurrency: usize,
 }
 
 impl AiSettings {
@@ -87,6 +94,8 @@ impl fmt::Debug for AiSettings {
             .field("timeout", &self.timeout)
             .field("max_repair_attempts", &self.max_repair_attempts)
             .field("job_concurrency", &self.job_concurrency)
+            .field("graphrag_timeout", &self.graphrag_timeout)
+            .field("graphrag_concurrency", &self.graphrag_concurrency)
             .finish()
     }
 }
@@ -326,6 +335,18 @@ impl Config {
                 DEFAULT_AI_JOB_CONCURRENCY as u64,
                 MAX_AI_JOB_CONCURRENCY as u64,
             )?),
+            graphrag_timeout: Duration::from_secs(number(
+                &lookup,
+                GRAPHRAG_TIMEOUT_VAR,
+                DEFAULT_GRAPHRAG_TIMEOUT.as_secs(),
+                MAX_GRAPHRAG_TIMEOUT.as_secs(),
+            )?),
+            graphrag_concurrency: small(number(
+                &lookup,
+                GRAPHRAG_CONCURRENCY_VAR,
+                DEFAULT_GRAPHRAG_CONCURRENCY as u64,
+                MAX_GRAPHRAG_CONCURRENCY as u64,
+            )?),
         };
 
         Ok(Self {
@@ -438,6 +459,8 @@ mod tests {
         assert_eq!(defaults.ai.timeout, Duration::from_secs(300));
         assert_eq!(defaults.ai.max_repair_attempts, 1);
         assert_eq!(defaults.ai.job_concurrency, 2);
+        assert_eq!(defaults.ai.graphrag_timeout, Duration::from_secs(120));
+        assert_eq!(defaults.ai.graphrag_concurrency, 2);
         let configured = config(&[
             (DATABASE_URL_VAR, URL),
             (AI_URL_VAR, "http://ai:8000"),

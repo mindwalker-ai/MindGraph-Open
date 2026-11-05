@@ -7,6 +7,8 @@
 //!          accounts.csv → analyze → ingest (Account + Customer lookup + OWNS)
 //!          devices.csv → analyze → ingest (Device + Customer lookup + USES)
 //!          Graph Explorer (M6): search, entity, neighbours, paths, subgraph
+//!          Ask MindGraph (M7): "Which customers share DEVICE-921?" with a
+//!          deterministic fake model; the evidence comes from the GraphStore
 //! graph B: ontology → customers.csv only, and must stay untouched by A
 //! ```
 
@@ -15,13 +17,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use mindgraph_api::{AppState, router};
 use mindgraph_core::{
-    GraphExplorerService, GraphProjectService, IngestionConfig, IngestionPorts, IngestionService,
-    MemoryMetadataStore, MetadataStore, OntologyService,
+    AiError, AiMetadata, AiStatus, GraphExplorerService, GraphProjectService, GraphRagAi,
+    GraphRagConfig, GraphRagService, IngestionConfig, IngestionPorts, IngestionService,
+    Interpretation, InterpretationRequest, MemoryMetadataStore, MetadataStore, OntologyService,
+    Synthesis, SynthesisRequest, SynthesizedAnswer,
 };
 use mindgraph_domain::{Entity, GraphId, TypeName};
 use mindgraph_graph::{Direction, EntitySearch, GraphStore, NeighborQuery};
@@ -37,6 +42,98 @@ const ACCOUNTS_MAPPING: &str = include_str!("../../../../examples/fraud/accounts
 const DEVICES: &str = include_str!("../../../../examples/fraud/devices.csv");
 const DEVICES_MAPPING: &str = include_str!("../../../../examples/fraud/devices.mapping.json");
 const BOUNDARY: &str = "fraud-example-boundary";
+
+/// A deterministic stand-in for the model. It interprets the demo question
+/// as a shared-device retrieval and phrases the answer only from the
+/// evidence context it receives (names and references), so every claim it
+/// makes comes from the GraphStore.
+struct FraudDemoAi;
+
+fn demo_metadata(version: &str) -> AiMetadata {
+    AiMetadata {
+        prompt_version: version.into(),
+        provider: "fake".into(),
+        model: "deterministic-demo".into(),
+    }
+}
+
+#[async_trait]
+impl GraphRagAi for FraudDemoAi {
+    async fn status(&self) -> AiStatus {
+        AiStatus::Ready {
+            provider: "fake".into(),
+            model: "deterministic-demo".into(),
+        }
+    }
+
+    async fn interpret(&self, request: &InterpretationRequest) -> Result<Interpretation, AiError> {
+        // A follow-up starts from the customer of the earlier question.
+        let source = if let Some(earlier) = request.earlier_entities.first() {
+            json!({"ref": earlier.reference})
+        } else if request.selected_entities.is_empty() {
+            json!({"entity_type": "Device", "match": {"device_id": "DEVICE-921"}})
+        } else {
+            json!({"ref": "S1"})
+        };
+        let intent = json!({"operation": "shared_neighbor", "source": source,
+            "entity_type": "Customer", "shared_entity_type": "Device", "relationship_type": "USES"});
+        Ok(Interpretation {
+            intent: serde_json::from_value(intent).unwrap(),
+            metadata: demo_metadata("graphrag_interpret_v1"),
+        })
+    }
+
+    async fn synthesize(&self, request: &SynthesisRequest) -> Result<Synthesis, AiError> {
+        let context = &request.context;
+        let item = |kind: &str, reference: &Value| {
+            context[kind]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| &item["ref"] == reference)
+                .unwrap()
+                .clone()
+        };
+        let group = &context["shared_groups"][0];
+        let device = item("entities", &group["shared"]);
+        let members: Vec<Value> = group["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| item("entities", member))
+            .collect();
+        let mut refs: Vec<String> = members
+            .iter()
+            .chain([&device])
+            .map(|e| e["ref"].as_str().unwrap().to_owned())
+            .collect();
+        refs.extend(
+            context["relationships"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["ref"].as_str().unwrap().to_owned()),
+        );
+        let answer = format!(
+            "{} ({}) and {} ({}) both use device {} [{}].",
+            members[0]["properties"]["name"].as_str().unwrap(),
+            members[0]["properties"]["customer_id"].as_str().unwrap(),
+            members[1]["properties"]["name"].as_str().unwrap(),
+            members[1]["properties"]["customer_id"].as_str().unwrap(),
+            device["properties"]["device_id"].as_str().unwrap(),
+            refs.join(", "),
+        );
+        Ok(Synthesis {
+            answer: SynthesizedAnswer {
+                answer,
+                evidence_refs: refs,
+                insufficient_evidence: false,
+                warnings: vec![],
+            },
+            metadata: demo_metadata("graphrag_synthesize_v1"),
+        })
+    }
+}
 
 /// The router with in-memory metadata and source storage over `graph`.
 pub async fn app(graph: Arc<dyn GraphStore>) -> Router {
@@ -67,7 +164,12 @@ pub async fn app(graph: Arc<dyn GraphStore>) -> Router {
             OntologyService::new(metadata, workspace_id),
             ingestion,
         )
-        .with_graph_explorer(explorer),
+        .with_graph_explorer(explorer.clone())
+        .with_graphrag(GraphRagService::new(
+            explorer,
+            Arc::new(FraudDemoAi),
+            GraphRagConfig::default(),
+        )),
     )
 }
 
@@ -331,6 +433,75 @@ async fn explore(app: &Router, graph_a: &str, graph_b: &str) {
 
     // Graph B cannot see graph A's entities.
     let (status, missing) = get(app, &format!("/api/v1/graphs/{graph_b}/entities/{alice}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(missing["error"]["code"], "ENTITY_NOT_FOUND");
+
+    ask(app, graph_a, graph_b, &alice, &budi).await;
+}
+
+/// Ask MindGraph (M7): the shared-device question, without and with a
+/// selected customer, and as a follow-up about the customer of an earlier
+/// question. The evidence must be exactly C001, C002, DEVICE-921 and their
+/// two USES relationships, read from the GraphStore.
+async fn ask(app: &Router, graph_a: &str, graph_b: &str, alice: &str, budi: &str) {
+    let uri = format!("/api/v1/graphs/{graph_a}/ask");
+    for body in [
+        json!({"question": "Which customers share Device DEVICE-921?"}),
+        json!({"question": "Who else shares this device?",
+               "scope": {"mode": "selected_entities", "entity_ids": [alice]}}),
+        json!({"question": "Does he share a device with anyone?",
+               "history": [{"question": "Who is customer C002?", "entity_ids": [budi]}]}),
+    ] {
+        let (status, answer) = post(app, &uri, &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["status"], "answered", "{answer}");
+        // Customers come in id order (creation order); references follow
+        // the evidence order, which depends on where retrieval started.
+        let text = answer["answer"].as_str().unwrap();
+        assert!(
+            text.starts_with(
+                "Alice Tan (C001) and Budi Santoso (C002) both use device DEVICE-921 ["
+            ),
+            "{text}"
+        );
+        let evidence = &answer["evidence"];
+        let mut entities: Vec<String> = evidence["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let properties = &e["properties"];
+                properties["customer_id"]
+                    .as_str()
+                    .or(properties["device_id"].as_str())
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        entities.sort();
+        assert_eq!(entities, ["C001", "C002", "DEVICE-921"]);
+        let relationships = evidence["relationships"].as_array().unwrap();
+        assert_eq!(relationships.len(), 2);
+        assert!(
+            relationships
+                .iter()
+                .all(|r| r["relationship_type"] == "USES")
+        );
+        let path = evidence["paths"][0]["entity_ids"].as_array().unwrap();
+        assert!(path.contains(&json!(alice)) && path.contains(&json!(budi)));
+        assert_eq!(answer["citations"].as_array().unwrap().len(), 5);
+        assert_eq!(answer["retrieval"]["truncated"], false);
+    }
+    // Alice is not in graph B, so a question scoped to her there is a 404.
+    let (status, missing) = post(
+        app,
+        &format!("/api/v1/graphs/{graph_b}/ask"),
+        &json!({"question": "Who else shares this device?",
+                "scope": {"mode": "selected_entities", "entity_ids": [alice]}})
+        .to_string(),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     assert_eq!(missing["error"]["code"], "ENTITY_NOT_FOUND");
 }

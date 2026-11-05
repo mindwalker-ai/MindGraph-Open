@@ -51,7 +51,11 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
         href: (graphId) => (graphId ? `/graphs/${graphId}/explore` : null),
       },
       { label: "Search", icon: Search, href: () => null },
-      { label: "Ask", icon: MessageSquareText, href: () => null, milestone: "M7" },
+      {
+        label: "Ask",
+        icon: MessageSquareText,
+        href: (graphId) => (graphId ? `/graphs/${graphId}/explore?ask=1` : null),
+      },
       { label: "Queries", icon: SquareTerminal, href: () => null },
     ],
   },
@@ -75,7 +79,11 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "AI",
     items: [
-      { label: "GraphRAG", icon: BrainCircuit, href: () => null, milestone: "M7" },
+      {
+        label: "GraphRAG",
+        icon: BrainCircuit,
+        href: (graphId) => (graphId ? `/graphs/${graphId}/explore?ask=1` : null),
+      },
       { label: "MCP", icon: Plug, href: () => null, milestone: "M8" },
     ],
   },
@@ -101,7 +109,7 @@ function useHost(): string {
 
 function disabledTitle(item: NavItem, graphId?: string): string {
   if (item.milestone) return comingIn(item.milestone);
-  if (!graphId && ["Graph", "Sources", "Ontology"].includes(item.label)) {
+  if (!graphId && ["Graph", "Ask", "GraphRAG", "Sources", "Ontology"].includes(item.label)) {
     return "Open a graph first";
   }
   return comingIn();

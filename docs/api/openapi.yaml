@@ -21,6 +21,14 @@ info:
     scoped to one graph and bounded; there is no endpoint that returns a
     whole graph, no full-text search and no graph-wide statistics.
 
+    GraphRAG (M7, optional) answers a question about one graph from bounded
+    graph evidence: MindGraph Core retrieves real entities, relationships
+    and paths through the GraphStore, the configured model phrases an answer
+    that cites them (`E1`, `R1`, `P1`), and Core keeps only citations of
+    retrieved evidence. The request takes a question and a scope, never a
+    query language, and nothing is ever written to the graph. Missing
+    evidence is a `200` with `status: insufficient_evidence`.
+
     Dataset ingestion (M4) is deterministic and needs no AI service:
     define an ontology, upload a CSV or JSON file, analyse it (an
     asynchronous job), then submit a mapping (another job). Jobs are
@@ -42,6 +50,8 @@ tags:
     description: Background analysis, ingestion and AI suggestion jobs.
   - name: explorer
     description: Read-only, bounded graph exploration (M6).
+  - name: graphrag
+    description: Ask MindGraph, graph-first question answering with evidence (M7, optional).
 paths:
   /health:
     get:
@@ -612,6 +622,124 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/ask:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    post:
+      tags: [graphrag]
+      operationId: askGraph
+      summary: Answer a question from bounded graph evidence
+      description: |
+        Synchronous and bounded: the model interprets the question into one
+        of four operations (`entity_lookup`, `neighbors`, `find_path`,
+        `shared_neighbor`), MindGraph validates that plan against the
+        ontology and limits, retrieves evidence from the GraphStore (at most
+        100 graph operations, 150 entities, 300 relationships, 48 KiB of
+        model context), and the model phrases an answer from that evidence.
+        Citations that do not refer to the evidence are removed. The whole
+        question must finish within `MINDGRAPH_GRAPHRAG_TIMEOUT_SECONDS`.
+
+        Follow-ups: `history` carries up to 3 earlier questions of the same
+        conversation (oldest first), each with up to 10 entity ids it was
+        about. The client keeps the conversation; nothing is stored. The ids
+        are checked against this graph again (ids that are not in it are
+        ignored with a warning), the model may refer to them as `H1`, `H2`, …,
+        and evidence is always retrieved afresh: an earlier answer is never
+        evidence.
+
+        What the model receives: the question, the ontology, the selected
+        entities' types and bounded properties, for a follow-up the earlier
+        questions and their entities' types and bounded properties, and the
+        bounded evidence context (references, types and properties; no
+        MindGraph ids).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AskRequest" }
+            examples:
+              scoped:
+                value:
+                  question: Who else shares this device?
+                  scope:
+                    mode: selected_entities
+                    entity_ids: [0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f]
+              follow_up:
+                value:
+                  question: Is there a path between them?
+                  history:
+                    - question: Which customers share Device DEVICE-921?
+                      entity_ids:
+                        - 0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e0f
+                        - 0190f0c1-7a2b-7c3d-8e4f-5a6b7c8d9e10
+      responses:
+        "200":
+          description: |
+            The answer, its evidence and checked citations. `status` is
+            `answered`, `partial` (a retrieval limit was reached; results may
+            be missing) or `insufficient_evidence`.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AskResponse" }
+        "400":
+          description: "`INVALID_QUESTION`, `INVALID_SCOPE`, `INVALID_HISTORY`, `INVALID_JSON` or `INVALID_GRAPH_ID`."
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`GRAPH_NOT_FOUND`, or `ENTITY_NOT_FOUND` for a selected entity that is not in the graph."
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "422":
+          description: "`INVALID_RETRIEVAL_PLAN` or `RETRIEVAL_LIMIT_EXCEEDED`: the model's plan does not fit the graph or the limits."
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: "`AI_INVALID_RESPONSE`: the model did not return a valid answer."
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: "`AI_NOT_CONFIGURED`, `AI_UNAVAILABLE` or `SERVICE_UNAVAILABLE`."
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "504":
+          description: "`AI_TIMEOUT`: the provider or the whole question exceeded its deadline."
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/graphrag/status:
+    get:
+      tags: [graphrag]
+      operationId: getGraphRagStatus
+      summary: Whether Ask MindGraph can answer questions now
+      description: Always `200`. Never contains URLs or credentials. Graph exploration never depends on it.
+      responses:
+        "200":
+          description: The GraphRAG status.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GraphBuilderStatus" }
   /api/v1/graph-builder/status:
     get:
       tags: [graph-builder]
@@ -718,10 +846,13 @@ components:
         `ROUTE_NOT_FOUND` (404),
         `METHOD_NOT_ALLOWED` (405), `CONFLICT` (409), `PAYLOAD_TOO_LARGE` (413),
         `UNSUPPORTED_MEDIA_TYPE`, `UNSUPPORTED_FILE_TYPE` (415),
-        `VALIDATION_FAILED`, `INVALID_MAPPING` (422), `INTERNAL_ERROR` (500),
+        `INVALID_QUESTION`, `INVALID_SCOPE`, `INVALID_HISTORY` (400, M7),
+        `VALIDATION_FAILED`, `INVALID_MAPPING`, `INVALID_RETRIEVAL_PLAN`,
+        `RETRIEVAL_LIMIT_EXCEEDED` (422), `INTERNAL_ERROR` (500),
+        `AI_INVALID_RESPONSE` (502),
         `SERVICE_UNAVAILABLE`, `AI_NOT_CONFIGURED`, `AI_UNAVAILABLE`,
-        `NOT_READY` (503). Messages never contain
-        dataset values or filesystem paths.
+        `NOT_READY` (503), `AI_TIMEOUT` (504). Messages never contain
+        dataset values, filesystem paths, prompts or provider details.
       headers:
         x-request-id: { $ref: "#/components/headers/RequestId" }
       content:
@@ -1270,3 +1401,174 @@ components:
           type: array
           maxItems: 1000
           items: { type: string, format: uuid }
+    AskRequest:
+      type: object
+      additionalProperties: false
+      required: [question]
+      properties:
+        question: { type: string, minLength: 1, maxLength: 2000 }
+        scope: { $ref: "#/components/schemas/AskScope" }
+        history:
+          type: array
+          maxItems: 3
+          description: Earlier questions of the conversation, oldest first (follow-ups).
+          items: { $ref: "#/components/schemas/AskHistoryTurn" }
+    AskHistoryTurn:
+      type: object
+      additionalProperties: false
+      required: [question]
+      properties:
+        question: { type: string, minLength: 1, maxLength: 2000 }
+        entity_ids:
+          type: array
+          maxItems: 10
+          description: |
+            Entities the earlier question was about or cited, most relevant
+            first. At most 10 distinct entities of the whole history are used
+            (newest question first).
+          items: { type: string, format: uuid }
+    AskScope:
+      description: |
+        `selected_entities` scopes the question to 1-5 entities of the graph
+        (the most reliable mode). `bounded_graph` (the default) lets
+        MindGraph discover candidates, inspecting at most 100.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode, entity_ids]
+          properties:
+            mode: { const: selected_entities }
+            entity_ids:
+              type: array
+              minItems: 1
+              maxItems: 5
+              items: { type: string, format: uuid }
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: { const: bounded_graph }
+    EvidenceEntity:
+      allOf:
+        - { $ref: "#/components/schemas/Entity" }
+        - type: object
+          required: [ref]
+          properties:
+            ref: { type: string, pattern: "^E[1-9][0-9]*$" }
+    EvidenceRelationship:
+      allOf:
+        - { $ref: "#/components/schemas/Relationship" }
+        - type: object
+          required: [ref]
+          properties:
+            ref: { type: string, pattern: "^R[1-9][0-9]*$" }
+    EvidencePath:
+      type: object
+      required: [ref, entity_ids, relationship_ids]
+      description: "`relationship_ids[i]` connects `entity_ids[i]` and `entity_ids[i + 1]`."
+      properties:
+        ref: { type: string, pattern: "^P[1-9][0-9]*$" }
+        entity_ids:
+          type: array
+          items: { type: string, format: uuid }
+        relationship_ids:
+          type: array
+          items: { type: string, format: uuid }
+    Citation:
+      type: object
+      required: [ref, kind]
+      properties:
+        ref: { type: string }
+        kind: { type: string, enum: [entity, relationship, path] }
+        id:
+          type: string
+          format: uuid
+          description: The cited entity or relationship; absent for paths.
+    PlanSummary:
+      type: object
+      description: The validated retrieval plan, for display. Descriptive only, never executable.
+      required: [operation]
+      properties:
+        operation:
+          type: string
+          enum: [entity_lookup, neighbors, find_path, shared_neighbor, unsupported]
+        source: { type: string }
+        target: { type: string }
+        entity_type: { type: string }
+        shared_entity_type: { type: string }
+        relationship_type: { type: string }
+        direction: { type: string, enum: [outgoing, incoming, both] }
+        max_depth: { type: integer, minimum: 1, maximum: 6 }
+        reason: { type: string, description: "The model's short explanation (untrusted text)." }
+        notes:
+          type: array
+          items: { type: string }
+    RetrievalReport:
+      type: object
+      required:
+        [scope, plan, operations, candidates_inspected, truncated, context_bytes, limitations]
+      properties:
+        scope: { type: string, enum: [selected_entities, bounded_graph] }
+        plan: { $ref: "#/components/schemas/PlanSummary" }
+        operations: { type: integer, minimum: 0, maximum: 100 }
+        candidates_inspected: { type: integer, minimum: 0 }
+        truncated:
+          type: boolean
+          description: A limit stopped retrieval or reduced the context; the answer may miss results.
+        context_bytes: { type: integer, minimum: 0, maximum: 49152 }
+        limitations:
+          type: array
+          items: { type: string }
+    AnswerMetadata:
+      type: object
+      required: [interpret_prompt_version, provider, model, conversation_turns, duration_ms]
+      properties:
+        interpret_prompt_version: { type: string, example: graphrag_interpret_v1 }
+        synthesize_prompt_version:
+          type: [string, "null"]
+          example: graphrag_synthesize_v1
+        provider: { type: string }
+        model: { type: string }
+        conversation_turns:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Earlier questions used as conversation context.
+        duration_ms: { type: integer, minimum: 0 }
+    AskResponse:
+      type: object
+      required:
+        [status, answer, answer_source, evidence, citations, warnings, retrieval, metadata]
+      properties:
+        status: { type: string, enum: [answered, partial, insufficient_evidence] }
+        answer:
+          type: string
+          maxLength: 4001
+          description: Model text with inline citations such as `[E1]`; unknown citations removed.
+        answer_source:
+          type: string
+          enum: [model, no_evidence, unsupported]
+          description: "`no_evidence` and `unsupported` answers are written by MindGraph, not by the model."
+        evidence:
+          type: object
+          required: [entities, relationships, paths]
+          properties:
+            entities:
+              type: array
+              maxItems: 150
+              items: { $ref: "#/components/schemas/EvidenceEntity" }
+            relationships:
+              type: array
+              maxItems: 300
+              items: { $ref: "#/components/schemas/EvidenceRelationship" }
+            paths:
+              type: array
+              items: { $ref: "#/components/schemas/EvidencePath" }
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/Citation" }
+        warnings:
+          type: array
+          items: { type: string }
+        retrieval: { $ref: "#/components/schemas/RetrievalReport" }
+        metadata: { $ref: "#/components/schemas/AnswerMetadata" }

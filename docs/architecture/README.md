@@ -557,8 +557,8 @@ the job fails with `AI_VALIDATION_FAILED`.
 
 The screens follow the MindGraph Open design (Titillium Web, IBM Plex
 Mono, the dark token palette, Lucide icons, a 220px sidebar or a 52px
-rail). Destinations of later milestones (Ask, GraphRAG, MCP, templates,
-the demo) are shown disabled with the milestone in their tooltip.
+rail). Destinations of later milestones (MCP, templates, the demo) are
+shown disabled with the milestone in their tooltip.
 
 - `/`: the welcome screen until a graph exists, then "Your Graphs" (cards
   drawn from each graph's ontology; an active graph opens in the Graph
@@ -655,9 +655,9 @@ contain no traversal logic. There is no endpoint that returns a whole graph.
 - `lib/graph/state.ts`: the investigation state (selection, focus, hidden
   entities and relationships, entity and relationship type filters,
   highlights, the active path, the layout), kept apart from the graph data
-  and never persisted. Highlighting takes any entities and relationships, so
-  GraphRAG evidence (M7) can reuse it. Node and edge appearance are pure
-  functions used as Sigma reducers.
+  and never persisted. Highlighting takes any entities and relationships
+  with a tone: blue for paths, orange for GraphRAG evidence (M7). Node and
+  edge appearance are pure functions used as Sigma reducers.
 - `lib/graph/layout.ts`: ForceAtlas2 with a bounded number of iterations
   (300 / 150 / 80 by size; never a background loop) and a circular layout
   grouped by entity type. After an expansion only the new nodes settle; the
@@ -692,4 +692,161 @@ filters and reset are client-side and never change the stored graph.
   entity (`?entity=`).
 - The canvas needs WebGL; without it the explorer says so, and the panels
   still work.
+
+## GraphRAG (ADR-010, M7)
+
+Graph-first question answering with verifiable evidence. **Python
+interprets and phrases; Rust validates, retrieves and verifies.** The model
+never reaches the GraphStore, never writes or runs a query language, and
+nothing from an answer is ever written to the graph. There is no vector
+store in M7.
+
+```text
+POST /api/v1/graphs/{id}/ask ─► GraphRagService (mindgraph-core)
+  1 graph in workspace · question ≤ 2000 chars · scope (1-5 selected ids, or bounded_graph)
+    · history (follow-ups: ≤ 3 earlier questions, ≤ 10 entity ids each)
+  2 active ontology · selected entities read through GraphExplorerService (404 if not in the graph)
+    · entities of earlier questions read again (missing ones ignored, ≤ 10 kept as H1…)
+  3 GraphRagAi::interpret ──HTTP──► AI service ─► RetrievalIntent (untrusted JSON)
+  4 mindgraph-graphrag::validate_intent ─► RetrievalPlan     (422 INVALID_RETRIEVAL_PLAN /
+                                                              RETRIEVAL_LIMIT_EXCEEDED)
+  5 mindgraph-graphrag::retrieve ─► GraphStore (search, neighbours, path; bounded)
+  6 EvidenceGraph ─► build_context (references only, ≤ 48 KiB)
+  7 GraphRagAi::synthesize ──HTTP──► AI service ─► answer + cited references
+  8 citations checked against the evidence ─► status, evidence, citations
+```
+
+### Crates
+
+| Crate | Responsibility |
+|---|---|
+| `mindgraph-graphrag` | Capability crate over the `GraphStore` port (no HTTP, no provider types): `RetrievalIntent` (wire) → `validate_intent` → `RetrievalPlan`; `retrieve` (bounded GraphStore calls, deterministic id order); `EvidenceGraph`, `EvidenceBuilder` and references; `build_context`; `GraphRagLimits`. |
+| `mindgraph-core` | `GraphRagAi` port (interpret, synthesize, status), `DisabledGraphRagAi`, `GraphRagService` (validation, deadline, concurrency, citation checks, statuses, logging). Reuses `GraphExplorerService` for workspace and graph isolation. |
+| `mindgraph-ai-client` | `HttpGraphRagAi`: `POST /internal/v1/graphrag/{interpret,synthesize}`, strict DTOs, the M5 error mapping and readiness. |
+| `mindgraph-api` | `POST /graphs/{id}/ask`, `GET /graphrag/status`, the error envelope; the request id is passed to the AI service. |
+| `services/ai` | `mindgraph_ai.graph_rag`: Pydantic schemas, versioned prompts (`graphrag_interpret_v1`, `graphrag_synthesize_v1`), semantic checks, the shared OpenAI-compatible provider. |
+
+### Operations
+
+| Operation | Retrieval | Bounds |
+|---|---|---|
+| `entity_lookup` | `get_entity` by id, or `search_entities` by type and exact typed values | 100 matches (truncation reported) |
+| `neighbors` | breadth-first `get_neighbors` from one entity; optional relationship type, neighbour type and direction | 1–3 hops, 100 relationships per call |
+| `find_path` | `find_path` between two entities | 1–6 hops (M2 limit); no path = insufficient evidence, never proof of disconnection |
+| `shared_neighbor` | from a selected member (its shared-type neighbours) or a shared entity, else search the shared type; then each candidate's members | 100 candidates; groups of ≥ 2 distinct members |
+| `unsupported` | nothing | answered as insufficient evidence without a model call |
+
+Anchors are a selected entity (`S1`…), an entity of an earlier question
+(`H1`…, follow-ups), an entity id or an entity type with exact property
+values typed by the ontology. An anchor that must name one
+entity (a neighbourhood centre, path endpoints, a shared-neighbour start)
+and matches several is reported as **ambiguous**: up to 10 candidates are
+shown as evidence and none is chosen.
+
+### Limits
+
+`GraphRagLimits` (per question): 100 GraphStore operations, 100 candidates,
+100 relationships per neighbourhood call, depth 3 (neighbours) and 6
+(paths), 150 evidence entities, 300 evidence relationships, 48 KiB of model
+context, property texts cut at 200 characters, 24 properties per item. None
+of them raises a GraphStore bound (`sanitized` clamps them). Every question
+runs under `MINDGRAPH_GRAPHRAG_TIMEOUT_SECONDS` (default 120: two model calls,
+each bounded by the AI service's 60-second provider timeout, plus bounded
+retrieval) including the wait for one of `MINDGRAPH_GRAPHRAG_CONCURRENCY`
+(default 2) slots. No database transaction is held while the model works.
+The API is synchronous: no job, no streaming, no stored conversation.
+
+### Follow-up questions
+
+The Ask panel keeps its conversation in the browser and sends the last
+three questions with each follow-up, each with the entity ids it was about
+(its scope, then the cited entities and the endpoints of cited
+relationships and paths, at most 10). Nothing is stored on the server.
+
+- `GraphRagService` checks the history (`INVALID_HISTORY` for more than 3
+  turns, an empty or too long question, more than 10 ids or a malformed
+  id), keeps at most 10 distinct earlier entities, newest question first,
+  and reads each one again through the `GraphStore` for this graph. Missing
+  ones (deleted, or ids of another graph) are ignored with a warning and
+  never reach the model.
+- The interpretation receives the earlier questions with the references of
+  their entities (`S1` when selected, else `H1`, `H2`, …) and those entities'
+  types and bounded properties. `validate_intent` resolves `H` references
+  like `S` references, so the model never needs a MindGraph id.
+- The synthesis receives the earlier questions only as context for what the
+  question refers to. Evidence is retrieved afresh for every question; an
+  earlier answer is never evidence, and earlier answers are not sent.
+- "New conversation" in the panel forgets the conversation; leaving the
+  page does too.
+
+### Evidence and citations
+
+- An `EvidenceGraph` holds only entities and relationships read from the
+  GraphStore for the requested graph, deduplicated by MindGraph id (parallel
+  relationships keep their own ids), with both endpoints of every
+  relationship present and every path connected (`validate`). Additions are
+  all-or-nothing within the budget, so truncation never leaves a dangling
+  relationship.
+- References are positional: `E1` is the first entity, `R1` the first
+  relationship, `P1` the first path (shared-neighbour groups also produce
+  member → shared → member paths).
+- The context is compact JSON with sorted keys and references only (no
+  MindGraph ids). When it exceeds 48 KiB it is reduced: shorter values and
+  fewer properties first, then whole items, keeping paths and groups (and
+  what they need) first. The reduced graph **is** the answer's evidence, so
+  the model can never cite an object the response does not contain.
+- After synthesis, Rust keeps only citations (listed or inline `[E1, R2]`)
+  that resolve to the evidence; unknown or fabricated ones are removed with a
+  warning. An answer that cites nothing is downgraded to
+  `insufficient_evidence`. Citation checks prove that the cited objects were
+  retrieved, not that the model interpreted them correctly; the answer is
+  presented as model text over shown evidence.
+- Status: `insufficient_evidence` when an anchor is missing or ambiguous, no
+  path exists within the depth, the model says so, or nothing is cited;
+  otherwise `partial` when retrieval or the context was truncated, else
+  `answered`. With no evidence at all, the model is not asked and MindGraph
+  answers itself (`answer_source: no_evidence`).
+
+### Security and privacy
+
+- Questions and property values are untrusted. Both prompts mark them as
+  data, pass them as JSON with `<` and `>` escaped inside tagged blocks, and
+  give the model no tools. Model output is parsed strictly, validated by
+  Pydantic and semantic checks in the AI service, then by Rust.
+- The model receives the question, the ontology, the selected entities'
+  types and bounded properties, and the bounded evidence context. Never
+  MindGraph ids, other graph data, credentials or the whole graph.
+- Logs (Rust and Python) carry request ids, graph ids, operations, counts,
+  sizes, truncation and durations; never questions, prompts, property values
+  or model output. No telemetry is sent.
+
+### Web UI
+
+Ask MindGraph lives in the explorer's right panel (`AskPanel`, mockup 08);
+the graph stays visible. `lib/graph/evidence.ts` verifies the response shape
+(every relationship endpoint and path item inside the evidence, citations of
+existing references) before anything reaches Graphology. The evidence is
+merged with the M6 `mergeSubgraph` (same ids, view budget) and highlighted
+with the `showEvidence` action (orange tone); clicking a reference highlights
+that entity, relationship or path and moves the camera; *Clear Evidence
+Highlight* resets the styling without removing data. The panel shows one
+honest answering state (the API reports no intermediate phases), the
+validated retrieval plan, limitations and warnings, and explains when no
+model is configured. Selecting an entity scopes the question to it;
+suggestions are derived from its type and the ontology's relationship types.
+
+### Known M7 limitations
+
+- Four operations only; no aggregates (counts, sums), filters on ranges or
+  multi-step plans. Questions outside them are answered as unsupported.
+- Exact matching only: a misspelt identifier finds nothing (no fuzzy,
+  full-text or semantic retrieval).
+- Path search cannot be restricted to relationship types (the filter is
+  ignored, with a note), and one of several shortest paths is returned.
+- Bounded discovery inspects the first 100 candidates by id order, not the
+  most relevant ones.
+- One question at a time in the panel; no conversation memory, history or
+  streaming.
+- Answers depend on the configured model's quality; citation checks do not
+  verify the model's interpretation.
 

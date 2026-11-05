@@ -70,6 +70,10 @@ pub enum ApplicationError {
     #[error("the AI service is unavailable")]
     AiUnavailable,
 
+    /// A GraphRAG question failed (invalid input, plan or AI failure).
+    #[error(transparent)]
+    GraphRag(crate::GraphRagError),
+
     /// A required backend (metadata database, graph store, source storage)
     /// is unavailable, or the job queue is full.
     #[error("a required backend is unavailable")]

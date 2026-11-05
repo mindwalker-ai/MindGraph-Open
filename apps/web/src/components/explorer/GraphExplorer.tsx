@@ -10,6 +10,10 @@
  * bounded subgraphs from MindGraph Core into the loaded Graphology graph,
  * which Sigma.js draws. The browser never holds more than the view budget
  * and never asks for the whole graph. Hiding and resetting are client-side.
+ *
+ * Ask MindGraph (M7) shares the right panel: an answer's evidence is merged
+ * into the same graph and highlighted in place, so the graph stays visible
+ * and nothing is drawn by a second renderer.
  */
 
 import {
@@ -21,6 +25,7 @@ import {
   Link2,
   LoaderCircle,
   type LucideIcon,
+  MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
   Route,
@@ -42,6 +47,12 @@ import {
   useState,
 } from "react";
 
+import {
+  type AskAvailability,
+  AskPanel,
+  type AskRun,
+  type AskTurn,
+} from "@/components/explorer/AskPanel";
 import type { CanvasHandle, CanvasProps } from "@/components/explorer/canvas";
 import {
   DetailsHint,
@@ -55,12 +66,24 @@ import { Rail } from "@/components/shell/AppShell";
 import { Button, Kicker, inputClass } from "@/components/ui/primitives";
 import { type ApiClient, ApiError, createApiClient } from "@/lib/api/client";
 import {
+  ASK_LIMITS,
+  type AskResponse,
+  type AskScope,
   EXPLORER_LIMITS,
   type Entity,
   type GraphProject,
   type NeighborOptions,
   type Ontology,
 } from "@/lib/api/types";
+import {
+  type EvidenceTargets,
+  evidenceSubgraph,
+  evidenceTargets,
+  historyTurn,
+  parseAskResponse,
+  refTargets,
+  suggestedQuestions,
+} from "@/lib/graph/evidence";
 import { type LayoutMode, layoutPositions, settleNewNodes } from "@/lib/graph/layout";
 import {
   type GraphBudget,
@@ -128,6 +151,11 @@ function describe(error: unknown): string {
   if (error instanceof MalformedGraphError) {
     return `MindGraph Core sent an unexpected graph payload: ${error.message}`;
   }
+  // `fetch` rejects with a TypeError ("Failed to fetch") when the connection
+  // drops, for example while the computer sleeps.
+  if (error instanceof TypeError) {
+    return "The connection to MindGraph was interrupted; check the network and try again.";
+  }
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -177,19 +205,48 @@ const NOTICE_TONE = {
   error: "border-danger/50 text-danger",
 };
 
+/** `1 entity`, `3 entities`. */
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 /** Measures an operation for the operation chip (duration only, no data). */
 function stopwatch(): () => number {
   const started = performance.now();
   return () => Math.round(performance.now() - started);
 }
 
-type MenuAction = "expand" | "path" | "connections" | "focus" | "collapse" | "hide" | "copy";
+/** Earlier questions shown in the Ask panel (only the last three are sent). */
+const MAX_THREAD = 10;
+
+/** An Ask MindGraph failure as a sentence; the loaded graph is never touched. */
+function askFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "AI_NOT_CONFIGURED":
+        return "Ask MindGraph needs a configured model (MINDGRAPH_LLM_PROVIDER). Exploring the graph keeps working.";
+      case "AI_UNAVAILABLE":
+        return "The AI service or the model provider is unavailable; try again later.";
+      case "AI_TIMEOUT":
+        return "The model did not answer in time; try again or ask a narrower question.";
+      case "ENTITY_NOT_FOUND":
+        return "The selected entity is not in this graph any more.";
+      default:
+        return `${error.message} (${error.code})`;
+    }
+  }
+  return describe(error);
+}
+
+type MenuAction =
+  "expand" | "path" | "connections" | "ask" | "focus" | "collapse" | "hide" | "copy";
 
 /** The entity context menu (mockup 07); every entry acts on the view only. */
 const MENU: [MenuAction, string, string, LucideIcon][] = [
   ["expand", "Expand neighbours", "E", Expand],
   ["path", "Find path from here", "P", Route],
   ["connections", "Connections in view", "", Link2],
+  ["ask", "Ask about this entity", "A", MessageSquareText],
   ["focus", "Focus", "F", Focus],
   ["collapse", "Collapse neighbours", "C", Shrink],
   ["hide", "Hide", "H", EyeOff],
@@ -205,6 +262,8 @@ export interface GraphExplorerProps {
   /** The canvas; tests pass a stand-in because jsdom has no WebGL. */
   Canvas?: ComponentType<CanvasProps>;
   budget?: GraphBudget;
+  /** `ask` opens Ask MindGraph first (`?ask=1`). */
+  initialPanel?: "details" | "ask";
 }
 
 export function GraphExplorer({
@@ -213,6 +272,7 @@ export function GraphExplorer({
   api: injected,
   Canvas = SigmaCanvas,
   budget = VIEW_BUDGET,
+  initialPanel = "details",
 }: GraphExplorerProps) {
   const [api] = useState(() => injected ?? createApiClient());
   // The loaded subgraph; mutated in place by merges, so React re-renders on `revision`.
@@ -226,7 +286,22 @@ export function GraphExplorer({
   const [connecting, setConnecting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [lastOperation, setLastOperation] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"details" | "path">("details");
+  const [panel, setPanel] = useState<"details" | "path" | "ask">(initialPanel);
+  // The seed is read once: later address changes (`?entity=` or the
+  // navigation's `?ask=1`) must not reload the investigation.
+  const [seedEntityId] = useState(initialEntityId);
+  // "Ask" in the navigation (`?ask=1`) opens the panel of a running explorer.
+  const [requestedPanel, setRequestedPanel] = useState(initialPanel);
+  if (requestedPanel !== initialPanel) {
+    setRequestedPanel(initialPanel);
+    if (initialPanel === "ask") setPanel("ask");
+  }
+  const [askAvailability, setAskAvailability] = useState<AskAvailability>("checking");
+  const [askScope, setAskScope] = useState<"selected" | "graph">("selected");
+  const [askQuestion, setAskQuestion] = useState("");
+  const [askRun, setAskRun] = useState<AskRun>({ status: "idle" });
+  // Earlier answered questions (browser memory only; never stored).
+  const [askThread, setAskThread] = useState<AskTurn[]>([]);
   const [pathForm, setPathForm] = useState<PathForm>({
     source: null,
     target: null,
@@ -437,6 +512,128 @@ export function GraphExplorer({
     }
   }
 
+  // --- Ask MindGraph ---------------------------------------------------------------------
+
+  function openAsk(entityId?: string) {
+    setMenu(null);
+    setPicking(null);
+    if (entityId && graph.hasNode(entityId)) {
+      dispatch({ type: "selectEntity", id: entityId });
+      setAskScope("selected");
+    }
+    setPanel("ask");
+  }
+
+  /** Merges the answer's evidence into the loaded graph and highlights `targets`. */
+  function applyEvidence(answer: AskResponse, targets: EvidenceTargets, fit: boolean) {
+    const result = mergeSubgraph(graph, evidenceSubgraph(answer), {
+      anchor: state.selectedEntityId,
+      graphId,
+      budget,
+    });
+    settleNewNodes(graph, result.addedEntityIds);
+    for (const id of targets.entityIds) dispatch({ type: "revealEntity", id });
+    changed();
+    dispatch({ type: "showEvidence", ...targets });
+    const notice = budgetNotice(result, budget);
+    if (notice) setNotice(notice);
+    const shown = targets.entityIds.filter((id) => graph.hasNode(id));
+    if (fit && shown.length > 0) controllerRef.current?.focus(shown);
+  }
+
+  async function submitAsk(text = askQuestion) {
+    const question = text.trim();
+    if (!question || askRun.status === "answering") return;
+    const selectedNode =
+      state.selectedEntityId && graph.hasNode(state.selectedEntityId)
+        ? graph.getNodeAttributes(state.selectedEntityId)
+        : null;
+    const scoped = askScope === "selected" && selectedNode !== null;
+    const scope: AskScope = scoped
+      ? { mode: "selected_entities", entity_ids: [selectedNode.id] }
+      : { mode: "bounded_graph" };
+    const scopeIds = scoped ? [selectedNode.id] : [];
+    const scopeLabel = scoped ? `about ${selectedNode.label}` : "whole graph (bounded)";
+    // The answered question becomes part of the conversation; a failed one
+    // is dropped (its retry replaces it).
+    const thread: AskTurn[] =
+      askRun.status === "completed"
+        ? [
+            ...askThread,
+            {
+              question: askRun.question,
+              scope: askRun.scope,
+              answer: askRun.answer,
+              turn: askRun.turn,
+            },
+          ].slice(-MAX_THREAD)
+        : askThread;
+    const history = thread.slice(-ASK_LIMITS.historyTurns).map((turn) => turn.turn);
+    setAskThread(thread);
+    setAskQuestion("");
+    setAskRun({ status: "answering", question, scope: scopeLabel });
+    // The previous answer's evidence no longer matches what the panel shows.
+    if (state.highlightTone === "evidence") dispatch({ type: "resetHighlight" });
+    const elapsed = stopwatch();
+    try {
+      const request = history.length > 0 ? { question, scope, history } : { question, scope };
+      const answer = parseAskResponse(await api.ask(graphId, request), graphId);
+      setAskRun({
+        status: "completed",
+        question,
+        scope: scopeLabel,
+        answer,
+        turn: historyTurn(question, scopeIds, answer),
+      });
+      setAskAvailability("ready");
+      track(
+        `ask(${scope.mode}${history.length > 0 ? `, follow-up ${history.length}` : ""}, ${answer.retrieval.plan.operation})`,
+        elapsed,
+        `${answer.status}, ${answer.evidence.entities.length} entities`,
+      );
+      if (answer.evidence.entities.length > 0) {
+        applyEvidence(answer, evidenceTargets(answer), false);
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "AI_NOT_CONFIGURED") {
+        setAskAvailability("not_configured");
+      }
+      setAskRun({ status: "error", question, scope: scopeLabel, message: askFailure(error) });
+    }
+  }
+
+  /** Forgets the conversation; the loaded graph stays. */
+  function newConversation() {
+    setAskThread([]);
+    setAskRun({ status: "idle" });
+    setAskQuestion("");
+    if (state.highlightTone === "evidence") dispatch({ type: "resetHighlight" });
+  }
+
+  function showTurnOnGraph(index: number) {
+    const turn = askThread[index];
+    if (turn) applyEvidence(turn.answer, evidenceTargets(turn.answer), true);
+  }
+
+  function showAnswerOnGraph() {
+    if (askRun.status !== "completed") return;
+    applyEvidence(askRun.answer, evidenceTargets(askRun.answer), true);
+  }
+
+  function showRef(ref: string) {
+    if (askRun.status !== "completed") return;
+    const targets = refTargets(askRun.answer, ref);
+    if (!targets) return;
+    applyEvidence(askRun.answer, targets, true);
+    if (ref.startsWith("E") && graph.hasNode(targets.entityIds[0])) {
+      controllerRef.current?.center(targets.entityIds[0]);
+    }
+  }
+
+  function clearEvidence() {
+    dispatch({ type: "resetHighlight" });
+  }
+
   function hideEntity(entityId: string) {
     setMenu(null);
     dispatch({ type: "hideEntity", id: entityId });
@@ -464,6 +661,8 @@ export function GraphExplorer({
         return openPathFinder(entityId);
       case "connections":
         return void connections(entityId);
+      case "ask":
+        return openAsk(entityId);
       case "focus":
         return controllerRef.current?.center(entityId);
       case "collapse":
@@ -547,12 +746,14 @@ export function GraphExplorer({
         return;
       }
       dispatch({ type: "selectEntity", id: entityId });
-      setPanel("details");
+      // The Ask panel stays open: a selection only changes the question's scope.
+      if (panel !== "ask") setPanel("details");
+      else setAskScope("selected");
     },
     onSelectRelationship(relationshipId: string) {
       setMenu(null);
       dispatch({ type: "selectRelationship", id: relationshipId });
-      setPanel("details");
+      if (panel !== "ask") setPanel("details");
     },
     onClearSelection() {
       setMenu(null);
@@ -592,7 +793,7 @@ export function GraphExplorer({
           limit: first.limit,
         });
         setPhase({ status: "ready", project, ontology: active, empty: results.length === 0 });
-        const seed = initialEntityId ?? results[0]?.id;
+        const seed = seedEntityId ?? results[0]?.id;
         if (seed) openSeed(seed);
       })
       .catch((error: unknown) => {
@@ -601,7 +802,23 @@ export function GraphExplorer({
     return () => {
       cancelled = true;
     };
-  }, [api, graphId, initialEntityId, attempt]);
+  }, [api, graphId, seedEntityId, attempt]);
+
+  // Whether a model is configured for Ask MindGraph (no URLs or keys).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .graphRagStatus()
+      .then((status) => {
+        if (!cancelled) setAskAvailability(status.status);
+      })
+      .catch(() => {
+        if (!cancelled) setAskAvailability("unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   // The inspected entity is kept in the address, so a refresh reopens it.
   useEffect(() => {
@@ -638,6 +855,10 @@ export function GraphExplorer({
         return;
       case "f":
         if (selected) controllerRef.current?.center(selected);
+        return;
+      case "a":
+        event.preventDefault();
+        openAsk();
         return;
     }
   });
@@ -716,6 +937,9 @@ export function GraphExplorer({
     state.highlightedEntityIds.size > 0;
   const menuNode =
     menu && graph.hasNode(menu.entityId) ? graph.getNodeAttributes(menu.entityId) : null;
+  const evidenceShown =
+    state.highlightTone === "evidence" &&
+    (state.highlightedEntityIds.size > 0 || state.highlightedRelationshipIds.size > 0);
 
   return (
     <Frame graphId={graphId}>
@@ -771,6 +995,14 @@ export function GraphExplorer({
         >
           Graph Builder
         </Link>
+        <Button
+          variant="primary"
+          icon={<MessageSquareText size={14} />}
+          aria-pressed={panel === "ask"}
+          onClick={() => (panel === "ask" ? setPanel("details") : openAsk())}
+        >
+          Ask MindGraph
+        </Button>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -827,6 +1059,24 @@ export function GraphExplorer({
                   : connecting
                     ? "Loading connections…"
                     : "Loading neighbourhood…"}
+              </span>
+            )}
+            {evidenceShown && (
+              <span
+                role="status"
+                className="pointer-events-auto inline-flex items-center gap-2 rounded-[4px] border border-risk/50 bg-panel px-3 py-1 font-mono text-[11px] text-text-2"
+              >
+                <span aria-hidden className="h-2 w-2 rounded-full bg-risk" />
+                Highlighting evidence ·{" "}
+                {count(state.highlightedEntityIds.size, "entity", "entities")} ·{" "}
+                {count(state.highlightedRelationshipIds.size, "relationship", "relationships")}
+                <button
+                  type="button"
+                  onClick={clearEvidence}
+                  className="rounded-[3px] border border-border-strong px-1.5 text-[10px] tracking-[0.6px] text-text-3 uppercase hover:text-text"
+                >
+                  Clear
+                </button>
               </span>
             )}
             {picking && panel === "path" && (
@@ -934,10 +1184,52 @@ export function GraphExplorer({
         </main>
 
         <aside
-          aria-label="Details"
-          className="flex w-[330px] shrink-0 flex-col border-l border-border bg-panel"
+          aria-label={panel === "ask" ? "Ask MindGraph" : "Details"}
+          className={cn(
+            "flex shrink-0 flex-col border-l border-border bg-panel",
+            panel === "ask" ? "w-[380px]" : "w-[330px]",
+          )}
         >
-          {panel === "path" ? (
+          {panel === "ask" ? (
+            <AskPanel
+              availability={askAvailability}
+              selected={
+                selectedNode
+                  ? { label: selectedNode.label, entityType: selectedNode.entityType }
+                  : null
+              }
+              scope={selectedNode ? askScope : "graph"}
+              question={askQuestion}
+              thread={askThread}
+              run={askRun}
+              suggestions={
+                ontology
+                  ? suggestedQuestions(
+                      ontology,
+                      selectedNode && askScope === "selected"
+                        ? { entityType: selectedNode.entityType, label: selectedNode.label }
+                        : null,
+                    )
+                  : []
+              }
+              evidenceShown={evidenceShown}
+              onScope={setAskScope}
+              onQuestion={setAskQuestion}
+              onSubmit={(question) => void submitAsk(question)}
+              onShowOnGraph={showAnswerOnGraph}
+              onShowRef={showRef}
+              onClearEvidence={clearEvidence}
+              onShowTurn={showTurnOnGraph}
+              onNewConversation={newConversation}
+              onOpenEntity={(id) => {
+                if (graph.hasNode(id)) {
+                  dispatch({ type: "selectEntity", id });
+                  controllerRef.current?.center(id);
+                }
+              }}
+              onClose={() => setPanel("details")}
+            />
+          ) : panel === "path" ? (
             <PathFinder
               form={pathForm}
               picking={picking}

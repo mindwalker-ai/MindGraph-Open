@@ -17,6 +17,11 @@ use crate::error::{ErrorDetails, default_details};
 /// The header carrying the request id, in both directions.
 pub(crate) const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
+/// The request id, available to handlers as a request extension (for
+/// example to correlate calls to the AI service).
+#[derive(Debug, Clone)]
+pub(crate) struct RequestId(pub(crate) String);
+
 /// Longest incoming request id that is accepted as-is.
 const MAX_REQUEST_ID_LEN: usize = 128;
 
@@ -37,8 +42,11 @@ fn incoming_request_id(request: &Request) -> Option<String> {
 
 /// Middleware: assigns the request id, runs the request in a tracing span,
 /// renders error envelopes and sets the `x-request-id` response header.
-pub(crate) async fn request_context(request: Request, next: Next) -> Response {
+pub(crate) async fn request_context(mut request: Request, next: Next) -> Response {
     let request_id = incoming_request_id(&request).unwrap_or_else(|| Uuid::now_v7().to_string());
+    request
+        .extensions_mut()
+        .insert(RequestId(request_id.clone()));
     let span = info_span!(
         "http_request",
         request_id = %request_id,
