@@ -374,7 +374,6 @@ const TEMPLATES = [
 ];
 
 function YourGraphs({ api, graphs }: { api: ApiClient; graphs: GraphProject[] }) {
-  const host = useHost();
   const [ontologies, setOntologies] = useState<Record<string, Ontology | null>>({});
   // The browser's local time; nothing during server rendering.
   const hello = useSyncExternalStore(
@@ -495,15 +494,19 @@ function YourGraphs({ api, graphs }: { api: ApiClient; graphs: GraphProject[] })
             </span>
           </div>
           <span
-            title="Not running yet"
+            title="Each MCP client starts mindgraph-mcp itself, over stdio"
             className="hidden h-8 items-center gap-2 rounded-[4px] border border-border bg-bg px-[10px] md:flex"
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-text-3" />
-            <span className="font-mono text-[11px] font-medium text-text-2">http://{host}/mcp</span>
+            <span className="font-mono text-[11px] font-medium text-text-2">
+              stdio · mindgraph-mcp
+            </span>
           </span>
-          <Button disabled title={comingIn("M8")} icon={<ArrowRight size={14} />}>
-            Set up MCP
-          </Button>
+          <Link
+            href={`/graphs/${graphs[0].id}/integrations/mcp`}
+            className="inline-flex h-8 items-center gap-2 rounded-[4px] border border-border-strong bg-raised px-3 text-[13px] font-semibold hover:bg-hover"
+          >
+            <ArrowRight size={14} /> Set up MCP
+          </Link>
         </section>
       </main>
     </AppShell>

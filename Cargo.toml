@@ -22,6 +22,7 @@ mindgraph-graph = { path = "crates/mindgraph-graph", default-features = false }
 mindgraph-ingestion = { path = "crates/mindgraph-ingestion" }
 mindgraph-ai-client = { path = "crates/mindgraph-ai-client" }
 mindgraph-graphrag = { path = "crates/mindgraph-graphrag" }
+mindgraph-mcp = { path = "crates/mindgraph-mcp" }
 
 # Domain
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
@@ -52,6 +53,10 @@ tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "s
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+# MCP server (M8, ADR-011): the official Rust SDK over stdio only.
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1.2.3"
 
 # Test-only
 tempfile = "3.27.0"

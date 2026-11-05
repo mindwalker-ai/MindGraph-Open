@@ -10,7 +10,7 @@ source of truth. This page only maps them onto the repository.
 | `mindgraph-web`  | `apps/web`                      | Next.js, port 3000                |
 | `mindgraph-core` | `crates/mindgraph-api` (binary) | Rust modular monolith, port 8080; composition root |
 | `mindgraph-ai`   | `services/ai`                   | FastAPI, internal only, port 8000 |
-| `mindgraph-mcp`  | `crates/mindgraph-mcp`          | Additional binary (M8)            |
+| `mindgraph-mcp`  | `crates/mindgraph-mcp`          | MCP server over stdio, started by each MCP client; calls Core's REST API (M8) |
 | `mindgraph`      | `crates/mindgraph-cli`          | Developer CLI                     |
 
 The `mindgraph-core` *process* is built from the `mindgraph-api` crate,
@@ -22,9 +22,9 @@ because the binary must sit in the outermost layer. The `mindgraph-core`
 Dependencies always point inward:
 
 ```text
- mindgraph-api   mindgraph-mcp   mindgraph-cli        (entry points)
-        \              |              /
-         └──────► mindgraph-core ◄───┘               (application / use cases)
+ mindgraph-api        mindgraph-cli                   (entry points)
+        \              /
+         └──► mindgraph-core                          (application / use cases)
                         │
                         ▼
  mindgraph-graph, -ingestion, -ontology,              (capabilities)
@@ -32,7 +32,14 @@ Dependencies always point inward:
                         │
                         ▼
                 mindgraph-domain                      (pure domain model)
+
+ mindgraph-mcp ──HTTP──► mindgraph-core (process)     (no crate dependency)
 ```
+
+`mindgraph-mcp` is the exception to the inward direction: it reaches the
+application layer over Core's public REST API and links no MindGraph crate
+(ADR-011 refinement, ADR-015). `make check-mcp-boundary` enforces this. The
+`mindgraph` CLI launches it for `mindgraph mcp`.
 
 `mindgraph-domain` may depend only on small, infrastructure-free libraries
 (`serde`, `serde_json`, `uuid`, `chrono`, `thiserror`). CI enforces this with
@@ -557,8 +564,8 @@ the job fails with `AI_VALIDATION_FAILED`.
 
 The screens follow the MindGraph Open design (Titillium Web, IBM Plex
 Mono, the dark token palette, Lucide icons, a 220px sidebar or a 52px
-rail). Destinations of later milestones (MCP, templates, the demo) are
-shown disabled with the milestone in their tooltip.
+rail). Destinations of later milestones (templates, the demo) are shown
+disabled with the milestone in their tooltip.
 
 - `/`: the welcome screen until a graph exists, then "Your Graphs" (cards
   drawn from each graph's ontology; an active graph opens in the Graph
@@ -845,8 +852,76 @@ suggestions are derived from its type and the ontology's relationship types.
   ignored, with a note), and one of several shortest paths is returned.
 - Bounded discovery inspects the first 100 candidates by id order, not the
   most relevant ones.
-- One question at a time in the panel; no conversation memory, history or
-  streaming.
+- Follow-ups use the last 3 questions of the browser session only; there is
+  no saved history and no streaming.
 - Answers depend on the configured model's quality; citation checks do not
   verify the model's interpretation.
+
+## MCP server (ADR-011, M8)
+
+`mindgraph-mcp` exposes one graph to AI agents over the Model Context
+Protocol. User documentation: [`docs/mcp/`](../mcp/README.md).
+
+```text
+MCP client ─stdio─► mindgraph-mcp ─HTTP─► mindgraph-core /api/v1/graphs/{id}/…
+                     │                     ├─ GraphExplorerService (M6)
+                     │                     └─ GraphRagService (M7, ask_graph)
+                     └─ stdout: MCP messages only · stderr: logs
+```
+
+### Crate
+
+| Module | Role |
+| --- | --- |
+| `config` | `MINDGRAPH_MCP_*` from the environment: loopback-only `http` Core URL, UUIDv7 graph id, bounded timeouts and result size, `ask_graph` flag |
+| `client` | `CoreClient`: one `reqwest::Client`, paths built from the configured graph id, deadlines, body limit (twice the result limit), no redirects, no proxy, an `x-request-id` per request, Core error envelopes mapped to tool errors, elements of other graphs discarded |
+| `dto` | Core response shapes (decoded leniently) and tool results (Schemars output schemas) |
+| `tools` | `MindGraphMcp`: rmcp `#[tool_router]` with seven read-only tools and `ask_graph` (removed from the router unless enabled), argument checks, result size check |
+| `errors` | `ToolError`: MCP tool execution errors with JSON text (`code`, `message`, `hint`, `http_status`, `request_id`) and no structured content |
+| `cli` | `--help`, `--version`, `--check`; no arguments serves stdio. Shared by `mindgraph-mcp` and `mindgraph mcp` |
+
+### Tool contract
+
+| Tool | Core endpoint | Bounds (MCP; Core may be stricter) |
+| --- | --- | --- |
+| `get_graph_info` | `GET /graphs/{id}` | none |
+| `get_graph_schema` | `GET /graphs/{id}/ontology` | none |
+| `search_entities` | `POST /graphs/{id}/entities/search` | `limit` 1–100 (default 20), at most 20 filters, scalar or string-list values |
+| `get_entity` | `GET /graphs/{id}/entities/{entity_id}` | UUIDv7 id |
+| `get_neighbors` | `GET /graphs/{id}/entities/{entity_id}/neighbors` | `limit` 1–100 relationships (default 50) |
+| `find_path` | `POST /graphs/{id}/paths` | `max_depth` 1–6 (default 3) |
+| `get_subgraph` | `POST /graphs/{id}/subgraph` | 1–100 distinct ids; missing ids reported |
+| `ask_graph` | `POST /graphs/{id}/ask` | question ≤ 2,000 characters, 1–5 scoped entities (M7 limits); opt-in |
+
+Every result must fit `MINDGRAPH_MCP_MAX_RESULT_BYTES` (default 256 KiB),
+or the call fails with `RESULT_TOO_LARGE`. Tool annotations:
+`readOnlyHint: true` and `destructiveHint: false` for every tool;
+`openWorldHint: false` except for `ask_graph`, which may contact a model
+provider.
+
+### Tests
+
+| Suite | What it runs |
+| --- | --- |
+| `src/config.rs`, `src/errors.rs` | Configuration bounds and URL rules; error rendering |
+| `src/client/tests.rs` | The REST adapter against wiremock: every endpoint, 400/404/503 envelopes, HTML error pages, malformed JSON, oversized bodies, timeouts, redirects, unreachable Core, request ids, foreign-graph elements |
+| `tests/mcp_protocol.rs` | The real binary over stdio with the rmcp client: discovery, schemas, annotations, structured output, tool errors, `ask_graph` opt-in, size limit, prompt-injection text as data, raw JSON-RPC for four protocol versions with stdout purity and EOF exit, configuration errors |
+| `tests/end_to_end.rs` | The real binary against the real Core router (fraud example loaded through the REST API): the agent workflow, graph isolation, `ask_graph` through GraphRAG, zero GraphStore writes. Also runs against HugeGraph (`make test-hugegraph`) and a running Core (`make test-mcp-live`) |
+
+### Known M8 limitations
+
+- **Transport and scope:** stdio only, one graph per server process, and a
+  loopback Core only. There is no remote MCP endpoint and no
+  authentication.
+- **Tool coverage:**
+  - Search is exact; no full-text, fuzzy or semantic search.
+  - No free-form query tool (`query_graph` is deferred).
+  - No graph-wide statistics, because Core does not compute them yet.
+- **Path search:** `find_path` returns one shortest path and cannot filter
+  by relationship type (Core's M6 limit).
+- **`ask_graph`:** no conversation history; each call is a first question.
+- **Distribution:**
+  - No published binary or crate, and no Docker image.
+  - Only Claude Code was tested as a real client. Codex and Cursor
+    configurations follow their documentation.
 

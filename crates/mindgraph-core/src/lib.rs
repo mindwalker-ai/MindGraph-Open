@@ -1,11 +1,12 @@
 //! Application layer of MindGraph Open (ADR-002).
 //!
 //! `mindgraph-core` runs use cases on top of `mindgraph-domain`. It reaches
-//! infrastructure only through ports, so the HTTP API, the MCP server and the
-//! CLI share one implementation of every use case:
+//! infrastructure only through ports, so every entry point shares one
+//! implementation of every use case. The MCP server (`mindgraph-mcp`) uses
+//! them through the HTTP API, not as a crate dependency (ADR-011, M8):
 //!
 //! ```text
-//! mindgraph-api / mindgraph-mcp / mindgraph-cli
+//! mindgraph-api / mindgraph-cli
 //!                  │
 //!                  ▼
 //!            mindgraph-core ── MetadataStore (port) ◄── mindgraph-metadata (PostgreSQL)

@@ -84,7 +84,11 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
         icon: BrainCircuit,
         href: (graphId) => (graphId ? `/graphs/${graphId}/explore?ask=1` : null),
       },
-      { label: "MCP", icon: Plug, href: () => null, milestone: "M8" },
+      {
+        label: "MCP",
+        icon: Plug,
+        href: (graphId) => (graphId ? `/graphs/${graphId}/integrations/mcp` : null),
+      },
     ],
   },
   {
@@ -109,7 +113,7 @@ function useHost(): string {
 
 function disabledTitle(item: NavItem, graphId?: string): string {
   if (item.milestone) return comingIn(item.milestone);
-  if (!graphId && ["Graph", "Ask", "GraphRAG", "Sources", "Ontology"].includes(item.label)) {
+  if (!graphId && ["Graph", "Ask", "GraphRAG", "MCP", "Sources", "Ontology"].includes(item.label)) {
     return "Open a graph first";
   }
   return comingIn();

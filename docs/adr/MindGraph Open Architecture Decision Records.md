@@ -1164,6 +1164,68 @@ Support stdio first.
 
 Streamable HTTP may be added after local MCP experience is stable.
 
+## Refinement (M8)
+
+M8 implements the server as a standalone Rust binary that reaches the
+application layer through MindGraph Core's public REST API, not in-process:
+
+```text
+Claude Code / Codex / Cursor ─stdio─► mindgraph-mcp ─HTTP (loopback)─► mindgraph-core
+                                                                       ├─ GraphExplorerService
+                                                                       └─ GraphRagService
+```
+
+- **Transport boundary.** `mindgraph-mcp` calls only Core's existing
+  `/api/v1` endpoints. It never connects to PostgreSQL, HugeGraph or the AI
+  service, needs none of their credentials, and links no other MindGraph
+  crate (`make check-mcp-boundary` enforces this in CI). The application
+  logic stays single: every tool is one call to an M6 explorer endpoint or
+  the M7 `ask` endpoint. A developer can therefore run the server without
+  database configuration, and it stays separately distributable.
+- **Transport.** stdio only, through the official Rust SDK `rmcp`. stdout
+  carries only MCP messages and diagnostics go to stderr. The process ends
+  on EOF or a signal. There is no daemon, Compose service or remote
+  endpoint, and Streamable HTTP is still deferred.
+- **Scope.** One graph project per process (`MINDGRAPH_MCP_GRAPH_ID`). No
+  tool accepts a graph id. The server also rejects any element Core returns
+  for another graph. Several graphs mean several server entries.
+- **Tools.**
+  - The read-only graph tools: `get_graph_info`, `get_graph_schema`,
+    `search_entities` (exact, typed matching only), `get_entity`,
+    `get_neighbors`, `find_path` and `get_subgraph`.
+  - Inputs come from Schemars JSON Schemas with unknown fields rejected.
+    The server checks ids, directions, limits (search 1–100, neighbours
+    1–100, subgraph 1–100 ids) and depths (1–6) before Core is called.
+  - Results are structured content with output schemas, bounded by
+    `MINDGRAPH_MCP_MAX_RESULT_BYTES` (default 256 KiB). An oversized result
+    is an error, never a truncated graph.
+- **`query_graph` is deferred.** The name suggests arbitrary query
+  execution. No free-form query, Gremlin or Cypher tool is exposed, and the
+  deterministic tools above cover the M8 needs. A generic query tool needs
+  its own reviewed, bounded query contract first.
+- **`ask_graph` is opt-in.** It is registered only with
+  `MINDGRAPH_MCP_ENABLE_ASK=true` and annotated `openWorldHint: true`. It
+  calls the M7 GraphRAG endpoint with its limits, so the question and
+  retrieved evidence may reach the model provider configured in Core. It
+  writes nothing.
+- **Mutation.** No mutation tool exists: nothing creates, deletes, ingests
+  or changes the ontology. Annotations (`readOnlyHint`) describe this
+  behaviour but do not enforce it; what enforces it is that no tool maps to
+  a write endpoint.
+- **Security.**
+  - The Core URL must be `http://` on a loopback host, without credentials
+    or a path. Remote Cores are not supported, because Core has no
+    authentication in v0.1.
+  - The HTTP client follows no redirects and uses no proxy.
+  - Requests have deadlines and bounded bodies, and carry an `x-request-id`.
+  - Tool errors are machine-readable MCP tool errors, and Core's error
+    codes pass through unchanged.
+- **Licensing (ADR-015).** The binary depends only on permissive
+  third-party crates, which keeps the proposed Apache-2.0 MCP package
+  separate from the AGPL server. Two points remain for legal review: the
+  AGPL dev-dependencies used by the end-to-end tests, and the AGPL CLI
+  linking the MCP crate. See `docs/mcp/README.md`.
+
 ---
 
 # ADR-012: Frontend and Graph Explorer Architecture
