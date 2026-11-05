@@ -24,6 +24,7 @@
 mod ai;
 mod error;
 mod executor;
+mod explorer;
 mod graph_builder;
 mod graph_projects;
 mod ingestion;
@@ -37,6 +38,7 @@ pub use ai::{
     DisabledGraphBuilderAi, GraphBuilderAi, GraphBuilderRequest, GraphBuilderSuggestion,
     OntologyContext, RepairContext, SuggestionAnnotations, TypeAnnotation,
 };
+pub use explorer::{EntitySearchRequest, GraphExplorerService, MAX_SEARCH_FILTERS};
 pub use graph_builder::{
     DEFAULT_AI_JOB_CONCURRENCY, GraphBuilderConfig, GraphBuilderResult, GraphBuilderService,
     MAX_AI_JOB_CONCURRENCY, MAX_REPAIR_ATTEMPTS, MAX_SUGGESTED_ENTITY_TYPES,

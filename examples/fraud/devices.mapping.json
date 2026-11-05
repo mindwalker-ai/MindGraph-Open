@@ -1,0 +1,31 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "device",
+        "entity_type": "Device",
+        "mode": "create_or_match",
+        "identity": [{ "source_field": "device_id", "property": "device_id" }],
+        "properties": [
+          { "source_field": "device_id", "property": "device_id" },
+          { "source_field": "device_type", "property": "device_type" }
+        ]
+      },
+      {
+        "alias": "customer",
+        "entity_type": "Customer",
+        "mode": "match_only",
+        "identity": [{ "source_field": "customer_id", "property": "customer_id" }],
+        "properties": []
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "USES",
+        "source": "customer",
+        "target": "device",
+        "properties": [{ "source_field": "first_seen", "property": "first_seen" }]
+      }
+    ]
+  }
+}

@@ -68,11 +68,34 @@ describe("HomeScreen", () => {
     expect(screen.getByText("Explore Demo").closest("[aria-disabled]")).not.toBeNull();
   });
 
-  it("lists graphs with their ontology and keeps later features disabled", async () => {
-    render(<HomeScreen api={api()} />);
+  it("opens draft graphs on the upload step", async () => {
+    render(
+      <HomeScreen
+        api={api({ listGraphs: vi.fn().mockResolvedValue([{ ...GRAPH, status: "draft" }]) })}
+      />,
+    );
     const graphs = await screen.findByRole("region", { name: "Graphs" });
     const card = within(graphs).getByText("Fraud Investigation").closest("a");
     expect(card?.getAttribute("href")).toBe("/graphs/g1/upload");
+    expect(within(graphs).queryByRole("link", { name: /Explore Graph/ })).toBeNull();
+  });
+
+  it("lists graphs with their ontology and keeps later features disabled", async () => {
+    render(<HomeScreen api={api()} />);
+    const graphs = await screen.findByRole("region", { name: "Graphs" });
+    // An active graph opens in the Graph Explorer, with a way to add more data.
+    const card = within(graphs).getByText("Fraud Investigation").closest("a");
+    expect(card?.getAttribute("href")).toBe("/graphs/g1/explore");
+    expect(
+      within(graphs)
+        .getByRole("link", { name: /Explore Graph/ })
+        .getAttribute("href"),
+    ).toBe("/graphs/g1/explore");
+    expect(
+      within(graphs)
+        .getByRole("link", { name: /Add data/ })
+        .getAttribute("href"),
+    ).toBe("/graphs/g1/upload");
     expect(await within(graphs).findByRole("img", { name: /1 entity types/ })).toBeDefined();
     expect(within(graphs).getByText(/ontology v2/)).toBeDefined();
     for (const button of screen.getAllByRole("button", { name: /Use template/ })) {

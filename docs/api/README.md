@@ -11,6 +11,14 @@ The public API is versioned JSON REST (ADR-006). The authoritative contract is
 | `GET`  | `/api/v1/graphs?limit=50` | List graph projects, newest first (`limit` 1–100). |
 | `GET`  | `/api/v1/graphs/{graph_id}` | Read a graph project. |
 | `GET`  | `/api/v1/graphs/{graph_id}/ontology` | Read its active ontology (read-only in v0.1). |
+| `POST` | `/api/v1/graphs/{graph_id}/entities/search` | Exact entity search by type and property values (M6). |
+| `GET`  | `/api/v1/graphs/{graph_id}/entities/{entity_id}` | Read one entity (M6). |
+| `GET`  | `/api/v1/graphs/{graph_id}/entities/{entity_id}/neighbors` | Bounded neighbourhood: `direction`, `relationship_type`, `limit` (M6). |
+| `POST` | `/api/v1/graphs/{graph_id}/paths` | Shortest path within `max_depth` (1–6) hops (M6). |
+| `POST` | `/api/v1/graphs/{graph_id}/subgraph` | Given entities and the relationships among them (M6). |
+
+Dataset (M4) and AI Graph Builder (M5) endpoints are described in
+[`openapi.yaml`](openapi.yaml).
 
 ## Request ids
 
@@ -27,8 +35,8 @@ Every error, including unknown routes and wrong methods, uses one envelope:
 
 | Status | Codes |
 | ------ | ----- |
-| 400 | `INVALID_JSON`, `INVALID_QUERY`, `INVALID_REQUEST`, `INVALID_GRAPH_ID` |
-| 404 | `GRAPH_NOT_FOUND`, `ROUTE_NOT_FOUND` |
+| 400 | `INVALID_JSON`, `INVALID_QUERY`, `INVALID_REQUEST`, `INVALID_GRAPH_ID`, `INVALID_ENTITY_ID` |
+| 404 | `GRAPH_NOT_FOUND`, `ENTITY_NOT_FOUND`, `ROUTE_NOT_FOUND` |
 | 405 | `METHOD_NOT_ALLOWED` |
 | 409 | `CONFLICT` |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` |

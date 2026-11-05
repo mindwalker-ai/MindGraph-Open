@@ -557,12 +557,13 @@ the job fails with `AI_VALIDATION_FAILED`.
 
 The screens follow the MindGraph Open design (Titillium Web, IBM Plex
 Mono, the dark token palette, Lucide icons, a 220px sidebar or a 52px
-rail). Destinations of later milestones (Graph Explorer, Ask, GraphRAG,
-MCP, templates, the demo) are shown disabled with the milestone in their
-tooltip.
+rail). Destinations of later milestones (Ask, GraphRAG, MCP, templates,
+the demo) are shown disabled with the milestone in their tooltip.
 
 - `/`: the welcome screen until a graph exists, then "Your Graphs" (cards
-  drawn from each graph's ontology; instance counts arrive with M6).
+  drawn from each graph's ontology; an active graph opens in the Graph
+  Explorer, a draft one on the upload step; graph-wide counts are not
+  computed).
 - `/graphs/new`: name and how to start (CSV, JSON, or an empty ontology).
 - `/graphs/{id}/upload`: drop several files; each is uploaded and analysed
   at once (rows, columns, headers, preview). The ids live in `?sources=`,
@@ -580,8 +581,8 @@ ontology with `expected_version` set to the draft's base version (skipped
 when unchanged; the server rejects a stale base atomically with `409`), then
 ingests each mapped file in a safe order, one idempotency key per file. A
 file that cannot start keeps its key for **Retry ingestion**; files already
-ingested are never ingested twice. `/graphs/{id}/explore` is a placeholder
-for M6.
+ingested are never ingested twice. The success screen links to the Graph
+Explorer (M6, below).
 
 ### Known M5 limitations
 
@@ -596,4 +597,99 @@ for M6.
   probabilities.
 - `/ready` of core does not include the AI service (AI is optional); see
   `GET /api/v1/graph-builder/status`.
+
+## Graph Explorer (ADR-012, M6)
+
+A read-only investigation workspace at `/graphs/{id}/explore`. The browser
+holds a bounded, growing subgraph; MindGraph Core and the `GraphStore` remain
+the source of truth and own every traversal.
+
+```text
+Sigma.js (WebGL canvas)          renders, never fetches
+   ▲ reducers: selection, hover, hidden, filters, path highlight
+Graphology MultiDirectedGraph    the loaded subgraph (node = EntityId, edge = RelationshipId)
+   ▲ mergeSubgraph (dedup, budget, placement)        investigation state (React reducer)
+lib/api/client.ts                same-origin /api/v1 (Next.js proxy)
+   ▲
+mindgraph-api  explorer handlers  →  GraphExplorerService (core)  →  Arc<dyn GraphStore>
+                                                                     HugeGraph / memory
+```
+
+### Backend
+
+`GraphExplorerService` (`mindgraph-core`) wraps five bounded reads of the
+shared `GraphStore` (the same `Arc` the ingestion uses). Each call first
+checks that the graph exists in the workspace, so an unknown graph is
+`404 GRAPH_NOT_FOUND`, and an entity of another graph is
+`404 ENTITY_NOT_FOUND`. It logs the graph id, the operation, counts and
+the duration, never property values.
+
+| Endpoint | Store call | Bounds |
+| -------- | ---------- | ------ |
+| `POST /graphs/{id}/entities/search` | `search_entities` | exact match; at most 20 filters; `limit` 1–1,000 (default 100) |
+| `GET /graphs/{id}/entities/{entity_id}` | `get_entity` | one entity |
+| `GET /graphs/{id}/entities/{entity_id}/neighbors` | `get_neighbors` | `direction`, `relationship_type`, `limit` 1–1,000 relationships (default 100) |
+| `POST /graphs/{id}/paths` | `find_path` | fewest hops, `max_depth` 1–6 (default 3), `direction` |
+| `POST /graphs/{id}/subgraph` | `get_subgraph` | at most 1,000 entity ids |
+
+Search filters are typed with the active ontology (`PropertyValue::from_json`):
+with `entity_type`, by that type's schema; without it, only properties whose
+type is the same in every entity type. Integers may be sent as decimal
+strings. Responses render properties as plain JSON plus a `property_types`
+map; datetimes are RFC 3339 and integers beyond 2^53 - 1 are decimal strings,
+so JavaScript loses no digits. The HTTP handlers only parse and render; they
+contain no traversal logic. There is no endpoint that returns a whole graph.
+
+### Frontend
+
+- `lib/graph/transform.ts`: payload validation (a malformed or cross-graph
+  payload is rejected before anything changes), labels (a name-like
+  property, else a domain identifier such as `customer_id`, else the short
+  EntityId) and node / edge attributes. The API objects stay on the
+  attributes for the details panels.
+- `lib/graph/merge.ts`: `mergeSubgraph` adds entities and relationships by
+  id, keeps existing positions, places new nodes around the expanded entity,
+  sizes nodes by loaded degree (bounded) and curves parallel and opposite
+  relationships apart. Self-loops are kept in the model and listed in the
+  details panel, but Sigma 3 draws no loop.
+- `lib/graph/state.ts`: the investigation state (selection, focus, hidden
+  entities and relationships, entity and relationship type filters,
+  highlights, the active path, the layout), kept apart from the graph data
+  and never persisted. Highlighting takes any entities and relationships, so
+  GraphRAG evidence (M7) can reuse it. Node and edge appearance are pure
+  functions used as Sigma reducers.
+- `lib/graph/layout.ts`: ForceAtlas2 with a bounded number of iterations
+  (300 / 150 / 80 by size; never a background loop) and a circular layout
+  grouped by entity type. After an expansion only the new nodes settle; the
+  others stay fixed. A hierarchical layout is not provided.
+- `components/explorer/`: `GraphExplorer` orchestrates; `GraphCanvas` (Sigma,
+  loaded with `next/dynamic` and `ssr: false`) is the only WebGL code and
+  disposes Sigma, its listeners and animations on unmount; `ExplorerSidebar`,
+  `DetailsPanel`, `PathFinder` and `GraphToolbar` are plain React.
+
+Loading is discovery first: the graph, its active ontology and one page of
+25 entities, then the neighbourhood of one seed (the `?entity=` of the URL
+or the first result). Everything after that is incremental: expand
+(`neighbors`), connections among the loaded entities (`subgraph`) and paths
+(`paths`, merged and highlighted, the camera fitted to them). A failed
+request leaves the loaded graph as it was.
+
+The view budget is 500 entities and 1,500 relationships in the browser.
+Past it, a merge adds what fits and the explorer says how much was left out,
+offering to unload hidden entities or reset the view. Hide, collapse (hides
+the neighbours connected only to the entity; shared ones stay), type
+filters and reset are client-side and never change the stored graph.
+
+### Known M6 limitations
+
+- Exact search only: no full-text, prefix, fuzzy or semantic search, and no
+  graph-wide entity or relationship counts.
+- Path search follows any relationship type; it cannot be limited to some
+  types. When several shortest paths exist, one is returned.
+- Self-loops are not drawn on the canvas (they are listed in the details
+  panel). There is no hierarchical layout and no PNG export.
+- Investigation views are not saved; a reload restores only the inspected
+  entity (`?entity=`).
+- The canvas needs WebGL; without it the explorer says so, and the panels
+  still work.
 

@@ -1,0 +1,5 @@
+device_id,customer_id,device_type,first_seen
+DEVICE-921,C001,android,2026-09-01T10:00:00Z
+DEVICE-921,C002,android,2026-09-14T12:30:00Z
+DEVICE-109,C001,ios,2026-08-20T08:00:00Z
+DEVICE-447,C004,android,2026-06-02T07:45:00Z

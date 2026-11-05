@@ -45,8 +45,12 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "WORKSPACE",
     items: [
-      { label: "Graph", icon: Waypoints, href: () => null, milestone: "M6" },
-      { label: "Search", icon: Search, href: () => null, milestone: "M6" },
+      {
+        label: "Graph",
+        icon: Waypoints,
+        href: (graphId) => (graphId ? `/graphs/${graphId}/explore` : null),
+      },
+      { label: "Search", icon: Search, href: () => null },
       { label: "Ask", icon: MessageSquareText, href: () => null, milestone: "M7" },
       { label: "Queries", icon: SquareTerminal, href: () => null },
     ],
@@ -59,8 +63,8 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
         icon: Database,
         href: (graphId) => (graphId ? `/graphs/${graphId}/upload` : null),
       },
-      { label: "Entities", icon: Box, href: () => null, milestone: "M6" },
-      { label: "Relationships", icon: Spline, href: () => null, milestone: "M6" },
+      { label: "Entities", icon: Box, href: () => null },
+      { label: "Relationships", icon: Spline, href: () => null },
       {
         label: "Ontology",
         icon: Network,
@@ -97,7 +101,7 @@ function useHost(): string {
 
 function disabledTitle(item: NavItem, graphId?: string): string {
   if (item.milestone) return comingIn(item.milestone);
-  if (!graphId && (item.label === "Sources" || item.label === "Ontology")) {
+  if (!graphId && ["Graph", "Sources", "Ontology"].includes(item.label)) {
     return "Open a graph first";
   }
   return comingIn();
@@ -162,7 +166,7 @@ export function Sidebar({ graphId, graphName }: { graphId?: string; graphName?: 
       </Link>
       <span
         aria-disabled
-        title={comingIn("M6")}
+        title={comingIn()}
         className="flex w-full cursor-not-allowed items-center gap-2 rounded-[4px] border border-border px-2 py-[7px]"
       >
         <Search size={14} className="text-text-3" />

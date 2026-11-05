@@ -96,6 +96,11 @@ impl From<ApplicationError> for ApiError {
             ApplicationError::JobNotFound(_) => {
                 Self::new(StatusCode::NOT_FOUND, "JOB_NOT_FOUND", "Job was not found")
             }
+            ApplicationError::EntityNotFound(_) => Self::new(
+                StatusCode::NOT_FOUND,
+                "ENTITY_NOT_FOUND",
+                "Entity was not found",
+            ),
             ApplicationError::Conflict(message) => {
                 // Service conflict messages describe state, never stored data.
                 warn!(error = %message, "request conflicted with existing data");
