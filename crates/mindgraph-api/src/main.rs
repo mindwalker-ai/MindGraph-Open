@@ -5,6 +5,7 @@
 //!        → HugeGraph schema (ensure_schema) ─► HugeGraphStore ──┐  ├► OntologyService
 //!        → <data dir>/sources ─► LocalSourceStore ──────────────┴──┴► IngestionService
 //!        → MINDGRAPH_AI_URL ─► HttpGraphBuilderAi (or AI disabled) ─► GraphBuilderService
+//!                          ─► HttpGraphRagAi (or AI disabled) ─► GraphRagService (+ explorer reads)
 //!        → restart recovery (fail cut-off jobs) → router → serve
 //! ```
 //!
@@ -17,12 +18,12 @@ use std::error::Error;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use mindgraph_ai_client::HttpGraphBuilderAi;
+use mindgraph_ai_client::{HttpGraphBuilderAi, HttpGraphRagAi};
 use mindgraph_api::{AppState, Config, SERVICE_NAME, router};
 use mindgraph_core::{
-    DisabledGraphBuilderAi, GraphBuilderAi, GraphBuilderConfig, GraphBuilderService,
-    GraphExplorerService, GraphProjectService, IngestionPorts, IngestionService, MetadataStore,
-    OntologyService,
+    DisabledGraphBuilderAi, DisabledGraphRagAi, GraphBuilderAi, GraphBuilderConfig,
+    GraphBuilderService, GraphExplorerService, GraphProjectService, GraphRagAi, GraphRagConfig,
+    GraphRagService, IngestionPorts, IngestionService, MetadataStore, OntologyService,
 };
 use mindgraph_graph::{GraphStore, HugeGraphConfig, HugeGraphStore};
 use mindgraph_ingestion::LocalSourceStore;
@@ -83,6 +84,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
         workspace_id,
         config.ingestion,
     )?;
+    let graphrag_ai: Arc<dyn GraphRagAi> = match config.ai.url() {
+        Some(url) => Arc::new(HttpGraphRagAi::new(url, config.ai.graphrag_timeout)?),
+        None => Arc::new(DisabledGraphRagAi),
+    };
+    let graphrag = GraphRagService::new(
+        graph_explorer.clone(),
+        graphrag_ai,
+        GraphRagConfig {
+            timeout: config.ai.graphrag_timeout,
+            concurrency: config.ai.graphrag_concurrency,
+            ..GraphRagConfig::default()
+        },
+    );
     let ai: Arc<dyn GraphBuilderAi> = match config.ai.url() {
         Some(url) => {
             tracing::info!("AI Graph Builder enabled (internal AI service)");
@@ -106,7 +120,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let app = router(
         AppState::new(graph_projects, ontology, ingestion)
             .with_graph_builder(graph_builder)
-            .with_graph_explorer(graph_explorer),
+            .with_graph_explorer(graph_explorer)
+            .with_graphrag(graphrag),
     );
 
     let listener = TcpListener::bind(config.bind_addr).await?;

@@ -16,6 +16,8 @@ The public API is versioned JSON REST (ADR-006). The authoritative contract is
 | `GET`  | `/api/v1/graphs/{graph_id}/entities/{entity_id}/neighbors` | Bounded neighbourhood: `direction`, `relationship_type`, `limit` (M6). |
 | `POST` | `/api/v1/graphs/{graph_id}/paths` | Shortest path within `max_depth` (1–6) hops (M6). |
 | `POST` | `/api/v1/graphs/{graph_id}/subgraph` | Given entities and the relationships among them (M6). |
+| `POST` | `/api/v1/graphs/{graph_id}/ask` | Ask MindGraph: a question answered from bounded graph evidence, with checked citations; follow-ups carry up to 3 earlier questions in `history` (M7, needs a model). |
+| `GET`  | `/api/v1/graphrag/status` | Whether a model is configured for Ask MindGraph (`ready`, `not_configured`, `unavailable`). |
 
 Dataset (M4) and AI Graph Builder (M5) endpoints are described in
 [`openapi.yaml`](openapi.yaml).
@@ -35,13 +37,18 @@ Every error, including unknown routes and wrong methods, uses one envelope:
 
 | Status | Codes |
 | ------ | ----- |
-| 400 | `INVALID_JSON`, `INVALID_QUERY`, `INVALID_REQUEST`, `INVALID_GRAPH_ID`, `INVALID_ENTITY_ID` |
+| 400 | `INVALID_JSON`, `INVALID_QUERY`, `INVALID_REQUEST`, `INVALID_GRAPH_ID`, `INVALID_ENTITY_ID`, `INVALID_QUESTION`, `INVALID_SCOPE`, `INVALID_HISTORY` |
 | 404 | `GRAPH_NOT_FOUND`, `ENTITY_NOT_FOUND`, `ROUTE_NOT_FOUND` |
 | 405 | `METHOD_NOT_ALLOWED` |
 | 409 | `CONFLICT` |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` |
-| 422 | `VALIDATION_FAILED` (a domain rule, e.g. an empty graph name) |
+| 422 | `VALIDATION_FAILED` (a domain rule, e.g. an empty graph name), `INVALID_RETRIEVAL_PLAN`, `RETRIEVAL_LIMIT_EXCEEDED` (the model's GraphRAG plan does not fit the graph or the limits) |
 | 500 | `INTERNAL_ERROR` (details are logged, never returned) |
-| 503 | `SERVICE_UNAVAILABLE`, `NOT_READY` |
+| 502 | `AI_INVALID_RESPONSE` (the model did not return a valid answer) |
+| 503 | `SERVICE_UNAVAILABLE`, `NOT_READY`, `AI_NOT_CONFIGURED`, `AI_UNAVAILABLE` |
+| 504 | `AI_TIMEOUT` (the provider or the whole question exceeded its deadline) |
+
+A GraphRAG question without matching evidence is not an error: it is a
+`200` with `"status": "insufficient_evidence"`.
 
 The AI service is internal and never part of the public API (ADR-007).

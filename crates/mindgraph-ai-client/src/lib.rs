@@ -17,6 +17,10 @@
 
 #![warn(missing_docs)]
 
+mod graphrag;
+
+pub use graphrag::{DEFAULT_GRAPHRAG_HTTP_TIMEOUT, HttpGraphRagAi};
+
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -68,36 +72,45 @@ impl HttpGraphBuilderAi {
     /// [`InvalidAiUrl`] unless the URL is plain `http` with a host and no
     /// credentials, query or fragment (the service is internal).
     pub fn new(base_url: &str, timeout: Duration) -> Result<Self, InvalidAiUrl> {
-        let mut base = Url::parse(base_url.trim()).map_err(|_| InvalidAiUrl("not a URL"))?;
-        if base.scheme() != "http" {
-            return Err(InvalidAiUrl(
-                "only http:// is supported for the internal service",
-            ));
-        }
-        if base.host_str().is_none() || base.cannot_be_a_base() {
-            return Err(InvalidAiUrl("a host is required"));
-        }
-        if !base.username().is_empty() || base.password().is_some() {
-            return Err(InvalidAiUrl("credentials are not allowed"));
-        }
-        if base.query().is_some() || base.fragment().is_some() {
-            return Err(InvalidAiUrl("query strings and fragments are not allowed"));
-        }
-        if !base.path().ends_with('/') {
-            let path = format!("{}/", base.path());
-            base.set_path(&path);
-        }
+        let base = base_url_of(base_url)?;
         let join = |path| base.join(path).map_err(|_| InvalidAiUrl("not a URL"));
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|_| InvalidAiUrl("the HTTP client could not be created"))?;
         Ok(Self {
-            client,
+            client: http_client(timeout)?,
             suggest_url: join("internal/v1/graph-builder/suggest")?,
             ready_url: join("ready")?,
         })
     }
+}
+
+/// The base URL of the internal AI service, with a trailing slash.
+fn base_url_of(base_url: &str) -> Result<Url, InvalidAiUrl> {
+    let mut base = Url::parse(base_url.trim()).map_err(|_| InvalidAiUrl("not a URL"))?;
+    if base.scheme() != "http" {
+        return Err(InvalidAiUrl(
+            "only http:// is supported for the internal service",
+        ));
+    }
+    if base.host_str().is_none() || base.cannot_be_a_base() {
+        return Err(InvalidAiUrl("a host is required"));
+    }
+    if !base.username().is_empty() || base.password().is_some() {
+        return Err(InvalidAiUrl("credentials are not allowed"));
+    }
+    if base.query().is_some() || base.fragment().is_some() {
+        return Err(InvalidAiUrl("query strings and fragments are not allowed"));
+    }
+    if !base.path().ends_with('/') {
+        let path = format!("{}/", base.path());
+        base.set_path(&path);
+    }
+    Ok(base)
+}
+
+fn http_client(timeout: Duration) -> Result<reqwest::Client, InvalidAiUrl> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|_| InvalidAiUrl("the HTTP client could not be created"))
 }
 
 /// `POST /internal/v1/graph-builder/suggest` request body.
@@ -197,37 +210,41 @@ async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, AiErro
     Ok(body)
 }
 
+/// `GET /ready` of the AI service as an [`AiStatus`].
+async fn readiness(client: &reqwest::Client, ready_url: &Url) -> AiStatus {
+    let response = match client
+        .get(ready_url.clone())
+        .timeout(STATUS_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            warn!(
+                timeout = err.is_timeout(),
+                "AI service readiness check failed"
+            );
+            return AiStatus::Unavailable;
+        }
+    };
+    let status = response.status();
+    let Ok(body) = bounded_body(response).await else {
+        return AiStatus::Unavailable;
+    };
+    match serde_json::from_slice::<ReadyDto>(&body) {
+        Ok(ready) if status.is_success() && ready.status == "ready" => AiStatus::Ready {
+            provider: ready.provider.unwrap_or_default(),
+            model: ready.model.unwrap_or_default(),
+        },
+        Ok(ready) if ready.status == "not_configured" => AiStatus::NotConfigured,
+        _ => AiStatus::Unavailable,
+    }
+}
+
 #[async_trait]
 impl GraphBuilderAi for HttpGraphBuilderAi {
     async fn status(&self) -> AiStatus {
-        let response = match self
-            .client
-            .get(self.ready_url.clone())
-            .timeout(STATUS_TIMEOUT)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                warn!(
-                    timeout = err.is_timeout(),
-                    "AI service readiness check failed"
-                );
-                return AiStatus::Unavailable;
-            }
-        };
-        let status = response.status();
-        let Ok(body) = bounded_body(response).await else {
-            return AiStatus::Unavailable;
-        };
-        match serde_json::from_slice::<ReadyDto>(&body) {
-            Ok(ready) if status.is_success() && ready.status == "ready" => AiStatus::Ready {
-                provider: ready.provider.unwrap_or_default(),
-                model: ready.model.unwrap_or_default(),
-            },
-            Ok(ready) if ready.status == "not_configured" => AiStatus::NotConfigured,
-            _ => AiStatus::Unavailable,
-        }
+        readiness(&self.client, &self.ready_url).await
     }
 
     async fn suggest(&self, request: &GraphBuilderRequest) -> Result<AiSuggestion, AiError> {

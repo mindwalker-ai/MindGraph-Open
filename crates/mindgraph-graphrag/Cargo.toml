@@ -8,8 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# A capability crate (ADR-010, M7): retrieval plans, validation, bounded
+# GraphStore retrieval, evidence graphs and context serialisation. It reaches
+# graph data only through the GraphStore port (`mindgraph-graph` without its
+# HugeGraph feature) and knows nothing about LLM providers or HTTP.
 [dependencies]
 mindgraph-domain.workspace = true
+mindgraph-graph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

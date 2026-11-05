@@ -66,7 +66,7 @@ impl std::fmt::Debug for GraphExplorerService {
     }
 }
 
-fn graph_failure(error: GraphStoreError) -> ApplicationError {
+pub(crate) fn graph_failure(error: GraphStoreError) -> ApplicationError {
     match error {
         GraphStoreError::EntityNotFound { entity_id, .. } => {
             ApplicationError::EntityNotFound(entity_id)
@@ -97,8 +97,24 @@ impl GraphExplorerService {
         }
     }
 
+    /// The GraphStore, for other read-only use cases (GraphRAG).
+    pub(crate) fn graph_store(&self) -> &dyn GraphStore {
+        self.graph.as_ref()
+    }
+
+    /// The graph's active ontology; a graph without one is missing.
+    pub(crate) async fn active_ontology(
+        &self,
+        graph_id: GraphId,
+    ) -> Result<Ontology, ApplicationError> {
+        self.metadata
+            .get_active_ontology(graph_id)
+            .await?
+            .ok_or(ApplicationError::GraphNotFound(graph_id))
+    }
+
     /// The graph must exist in this workspace.
-    async fn ensure_graph(&self, graph_id: GraphId) -> Result<(), ApplicationError> {
+    pub(crate) async fn ensure_graph(&self, graph_id: GraphId) -> Result<(), ApplicationError> {
         self.metadata
             .get_graph(graph_id)
             .await?

@@ -14,6 +14,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 mindgraph-core.workspace = true
+mindgraph-graphrag.workspace = true
 mindgraph-ingestion.workspace = true
 reqwest.workspace = true
 serde.workspace = true

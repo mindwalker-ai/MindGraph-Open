@@ -3,13 +3,17 @@
 The AI service is an internal coprocessor consumed only by MindGraph Core
 (ADR-007). It is never published outside the Docker network and never
 writes PostgreSQL, HugeGraph or files: it turns a bounded dataset profile
-into a validated *suggestion* and nothing else.
+into a validated *suggestion*, a question into a validated retrieval
+*intent*, and bounded graph evidence into a cited *answer*. It never reaches
+graph storage; MindGraph Core retrieves the evidence and checks the results.
 
 Endpoints:
 
 - ``GET /health``: liveness; healthy even when AI is not configured.
 - ``GET /ready``: ``ready`` or ``not_configured`` (no URLs, no keys).
 - ``POST /internal/v1/graph-builder/suggest``: one Graph Builder suggestion.
+- ``POST /internal/v1/graphrag/interpret``: a question → one retrieval intent.
+- ``POST /internal/v1/graphrag/synthesize``: question + evidence → a cited answer.
 """
 
 from __future__ import annotations
@@ -26,6 +30,13 @@ from mindgraph_ai import __version__
 from mindgraph_ai.config import OPENAI_COMPATIBLE, Settings
 from mindgraph_ai.errors import AIServiceError
 from mindgraph_ai.graph_builder import GraphBuilderService
+from mindgraph_ai.graph_rag import GraphRagService
+from mindgraph_ai.graph_rag.schemas import (
+    InterpretRequest,
+    InterpretResponse,
+    SynthesizeRequest,
+    SynthesizeResponse,
+)
 from mindgraph_ai.observability import accept_request_id, configure_logging, request_id_var
 from mindgraph_ai.providers import LLMProvider, OpenAICompatibleProvider
 from mindgraph_ai.schemas import Health, Readiness, SuggestRequest, SuggestResponse
@@ -68,6 +79,7 @@ def create_app(
     settings = settings or Settings.from_env()
     provider = provider if provider is not None else build_provider(settings)
     graph_builder = GraphBuilderService(provider, max_output_tokens=settings.max_output_tokens)
+    graph_rag = GraphRagService(provider, max_output_tokens=settings.max_output_tokens)
     if provider is None:
         logger.info("AI Graph Builder not configured; manual graph building stays available")
     else:
@@ -128,6 +140,14 @@ def create_app(
     @app.post("/internal/v1/graph-builder/suggest")
     async def suggest(body: SuggestRequest) -> SuggestResponse:
         return await graph_builder.suggest(body, request_id_var.get())
+
+    @app.post("/internal/v1/graphrag/interpret", response_model_exclude_none=True)
+    async def interpret(body: InterpretRequest) -> InterpretResponse:
+        return await graph_rag.interpret(body, request_id_var.get())
+
+    @app.post("/internal/v1/graphrag/synthesize")
+    async def synthesize(body: SynthesizeRequest) -> SynthesizeResponse:
+        return await graph_rag.synthesize(body, request_id_var.get())
 
     return app
 

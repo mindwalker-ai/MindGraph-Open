@@ -122,7 +122,8 @@ export function parseEntity(value: unknown, graphId?: string): Entity {
   };
 }
 
-function parseRelationship(value: unknown, graphId?: string): Relationship {
+/** Checks one API relationship (with `graphId`, of that graph only). */
+export function parseRelationship(value: unknown, graphId?: string): Relationship {
   if (!isRecord(value)) throw new MalformedGraphError("a relationship must be an object");
   const id = text(value.id, "relationship id");
   return {

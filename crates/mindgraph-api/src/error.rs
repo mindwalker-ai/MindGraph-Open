@@ -12,7 +12,7 @@ use axum::Extension;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use mindgraph_core::ApplicationError;
+use mindgraph_core::{ApplicationError, GraphRagError};
 use tracing::{error, warn};
 
 /// The code and message of an error response, rendered into the envelope by
@@ -31,6 +31,12 @@ pub(crate) struct ApiError {
 }
 
 impl ApiError {
+    /// The stable error code.
+    #[cfg(test)]
+    pub(crate) const fn code(&self) -> &'static str {
+        self.details.code
+    }
+
     pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
@@ -129,6 +135,7 @@ impl From<ApplicationError> for ApiError {
                 "AI_UNAVAILABLE",
                 "The AI service is unavailable; try again later or continue manually",
             ),
+            ApplicationError::GraphRag(error) => Self::from(error),
             ApplicationError::Unavailable(source) => {
                 warn!(error = %source, "a required backend is unavailable");
                 Self::new(
@@ -146,6 +153,60 @@ impl From<ApplicationError> for ApiError {
                     "An unexpected error occurred",
                 )
             }
+        }
+    }
+}
+
+impl From<GraphRagError> for ApiError {
+    fn from(error: GraphRagError) -> Self {
+        match error {
+            GraphRagError::InvalidQuestion(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "INVALID_QUESTION", message)
+            }
+            GraphRagError::InvalidHistory(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "INVALID_HISTORY", message)
+            }
+            GraphRagError::InvalidScope(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "INVALID_SCOPE", message)
+            }
+            // Messages name schema names and limits, never stored values.
+            GraphRagError::InvalidRetrievalPlan(message) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_RETRIEVAL_PLAN",
+                format!("The question could not be turned into a valid graph retrieval: {message}"),
+            ),
+            GraphRagError::RetrievalLimitExceeded(message) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "RETRIEVAL_LIMIT_EXCEEDED",
+                format!("The retrieval would exceed MindGraph's limits: {message}"),
+            ),
+            GraphRagError::AiNotConfigured => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AI_NOT_CONFIGURED",
+                "Ask MindGraph needs a model: set MINDGRAPH_LLM_PROVIDER (see .env.example). Graph exploration keeps working without it",
+            ),
+            GraphRagError::AiUnavailable => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AI_UNAVAILABLE",
+                "The AI service or model provider is unavailable; try again later",
+            ),
+            GraphRagError::AiTimeout => Self::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "AI_TIMEOUT",
+                "The model provider did not answer in time; try again or ask a narrower question",
+            ),
+            GraphRagError::Timeout(seconds) => Self::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "AI_TIMEOUT",
+                format!(
+                    "The question was not answered within {seconds} seconds; try again or ask a narrower question"
+                ),
+            ),
+            GraphRagError::AiInvalidResponse => Self::new(
+                StatusCode::BAD_GATEWAY,
+                "AI_INVALID_RESPONSE",
+                "The model did not return a valid answer; try again",
+            ),
         }
     }
 }

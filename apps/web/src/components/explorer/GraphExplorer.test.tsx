@@ -6,7 +6,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CanvasHandle, CanvasProps } from "@/components/explorer/canvas";
 import { GraphExplorer } from "@/components/explorer/GraphExplorer";
 import { type ApiClient, ApiError } from "@/lib/api/client";
-import type { Entity, GraphProject, Ontology, Relationship, Subgraph } from "@/lib/api/types";
+import type {
+  AskResponse,
+  Entity,
+  GraphProject,
+  Ontology,
+  Relationship,
+  Subgraph,
+} from "@/lib/api/types";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...props }: { href: string; children: ReactNode }) => (
@@ -120,6 +127,63 @@ const NEIGHBOURS: Record<string, Subgraph> = {
 };
 const ENTITIES = Object.fromEntries([alice, budi, account, device].map((e) => [e.id, e]));
 
+/** Alice and Budi share DEVICE-921 (Budi is not loaded before the answer). */
+const ANSWER: AskResponse = {
+  status: "answered",
+  answer: "Alice Tan [E1] and Budi [E3] both use DEVICE-921 [E2] [R1, R2].",
+  answer_source: "model",
+  evidence: {
+    entities: [
+      { ...alice, ref: "E1" },
+      { ...device, ref: "E2" },
+      { ...budi, ref: "E3" },
+    ],
+    relationships: [
+      { ...usesA, ref: "R1" },
+      { ...usesB, ref: "R2" },
+    ],
+    paths: [
+      {
+        ref: "P1",
+        entity_ids: [alice.id, device.id, budi.id],
+        relationship_ids: [usesA.id, usesB.id],
+      },
+    ],
+  },
+  citations: [
+    { ref: "E1", kind: "entity", id: alice.id },
+    { ref: "E2", kind: "entity", id: device.id },
+    { ref: "E3", kind: "entity", id: budi.id },
+    { ref: "R1", kind: "relationship", id: usesA.id },
+    { ref: "R2", kind: "relationship", id: usesB.id },
+  ],
+  warnings: [],
+  retrieval: {
+    scope: "selected_entities",
+    plan: {
+      operation: "shared_neighbor",
+      source: "selected entity S1",
+      entity_type: "Customer",
+      shared_entity_type: "Device",
+      relationship_type: "USES",
+      direction: "both",
+    },
+    operations: 3,
+    candidates_inspected: 1,
+    truncated: false,
+    context_bytes: 900,
+    limitations: [],
+  },
+  metadata: {
+    interpret_prompt_version: "graphrag_interpret_v1",
+    synthesize_prompt_version: "graphrag_synthesize_v1",
+    provider: "openai_compatible",
+    model: "test-model",
+    conversation_turns: 0,
+    duration_ms: 1400,
+  },
+};
+
 const handle: CanvasHandle = {
   zoomIn: vi.fn(),
   zoomOut: vi.fn(),
@@ -131,9 +195,12 @@ const handle: CanvasHandle = {
   subscribe: () => () => {},
 };
 
-/** Draws the loaded graph as buttons, so tests can click entities and relationships. */
+/**
+ * Draws the loaded graph as buttons, so tests can click entities and
+ * relationships; `data-highlight` exposes the highlight tone.
+ */
 function FakeCanvas(props: CanvasProps) {
-  const { graph, controllerRef, onReady } = props;
+  const { graph, controllerRef, onReady, state } = props;
   useEffect(() => {
     controllerRef.current = handle;
     onReady();
@@ -148,6 +215,7 @@ function FakeCanvas(props: CanvasProps) {
         <button
           key={id}
           type="button"
+          data-highlight={state.highlightedEntityIds.has(id) ? state.highlightTone : undefined}
           onClick={() => props.onSelectEntity(id)}
           onDoubleClick={() => props.onExpand(id)}
         >
@@ -155,7 +223,14 @@ function FakeCanvas(props: CanvasProps) {
         </button>
       ))}
       {graph.mapEdges((id, attributes) => (
-        <button key={id} type="button" onClick={() => props.onSelectRelationship(id)}>
+        <button
+          key={id}
+          type="button"
+          data-highlight={
+            state.highlightedRelationshipIds.has(id) ? state.highlightTone : undefined
+          }
+          onClick={() => props.onSelectRelationship(id)}
+        >
           edge:{attributes.relationshipType}
         </button>
       ))}
@@ -194,6 +269,8 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}): ApiClie
       relationships: [usesA, usesB],
     }),
     getSubgraph: vi.fn().mockResolvedValue({ entities: [], relationships: [] }),
+    graphRagStatus: vi.fn().mockResolvedValue({ status: "ready", configured: true }),
+    ask: vi.fn().mockResolvedValue(ANSWER),
     ...overrides,
   } as ApiClient;
 }
@@ -410,5 +487,243 @@ describe("GraphExplorer", () => {
     expect(loaded("entities")).toBe("3 entities loaded");
     fireEvent.click(screen.getByRole("button", { name: "Show all" }));
     expect(screen.queryByText("1 hidden")).toBeNull();
+  });
+});
+
+describe("Ask MindGraph", () => {
+  const panel = () => screen.getByRole("complementary", { name: "Ask MindGraph" });
+  const highlighted = (label: string) =>
+    screen.getByText(`node:${label}`).getAttribute("data-highlight");
+
+  async function openAsk(client: ApiClient) {
+    explore(client);
+    await screen.findByRole("heading", { name: "Alice Tan" });
+    fireEvent.click(screen.getByRole("button", { name: "Ask MindGraph" }));
+    return within(panel());
+  }
+
+  function ask(ui: ReturnType<typeof within>, question: string) {
+    fireEvent.change(ui.getByRole("textbox", { name: "Question" }), {
+      target: { value: question },
+    });
+    fireEvent.click(ui.getByRole("button", { name: "Ask" }));
+  }
+
+  it("opens next to the graph, scoped to the selected entity, and closes", async () => {
+    const ui = await openAsk(api());
+    expect(screen.getByTestId("canvas")).toBeTruthy();
+    expect(
+      ui.getByRole("radio", { name: "Selected · Alice Tan" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    // Suggestions follow the ontology and the selected entity's type.
+    expect(
+      ui.getByRole("button", {
+        name: "Which other Customer entities share a Device with Alice Tan?",
+      }),
+    ).toBeTruthy();
+    fireEvent.click(ui.getByRole("button", { name: "Close Ask MindGraph" }));
+    expect(within(details()).getByRole("heading", { name: "Alice Tan" })).toBeTruthy();
+  });
+
+  it("asks about the selected entity and highlights the evidence", async () => {
+    let answer!: (value: AskResponse) => void;
+    const client = api({
+      ask: vi.fn(() => new Promise<AskResponse>((resolve) => (answer = resolve))),
+    });
+    const ui = await openAsk(client);
+    ask(ui, "Who else shares this device?");
+    expect(client.ask).toHaveBeenCalledWith("g1", {
+      question: "Who else shares this device?",
+      scope: { mode: "selected_entities", entity_ids: [alice.id] },
+    });
+    expect(ui.getByText("Retrieving graph evidence and writing the answer…")).toBeTruthy();
+    answer(ANSWER);
+    expect(await ui.findByText("Answered")).toBeTruthy();
+    expect(ui.getByText(/both use DEVICE-921/)).toBeTruthy();
+    expect(ui.getAllByRole("button", { name: "E1" }).length).toBeGreaterThan(0);
+    // The evidence was merged (Budi is new) and highlighted in place.
+    expect(loaded("entities")).toBe("4 entities loaded");
+    for (const label of ["Alice Tan", "Budi", "DEVICE-921"]) {
+      expect(highlighted(label)).toBe("evidence");
+    }
+    expect(highlighted("A100")).toBeNull();
+    expect(screen.getByText(/Highlighting evidence · 3 entities · 2 relationships/)).toBeTruthy();
+    // The answer gets the room: suggestions only start a conversation.
+    expect(ui.queryByText("Which entities are directly connected to Alice Tan?")).toBeNull();
+    expect(ui.getByRole("textbox", { name: "Question" })).toHaveProperty("value", "");
+  });
+
+  it("asks follow-ups with the earlier questions and the entities they cited", async () => {
+    const client = api();
+    const ui = await openAsk(client);
+    ask(ui, "Who else shares this device?");
+    await ui.findByText("Answered");
+    expect(ui.getByRole("textbox", { name: "Question" }).getAttribute("placeholder")).toBe(
+      "Ask a follow-up question…",
+    );
+    expect(ui.getByText("Follow-ups use your last 3 questions as context.")).toBeTruthy();
+
+    ask(ui, "Is there a path between them?");
+    // The selected entity first, then the cited ones in citation order.
+    expect(client.ask).toHaveBeenLastCalledWith("g1", {
+      question: "Is there a path between them?",
+      scope: { mode: "selected_entities", entity_ids: [alice.id] },
+      history: [
+        {
+          question: "Who else shares this device?",
+          entity_ids: [alice.id, device.id, budi.id],
+        },
+      ],
+    });
+    await waitFor(() =>
+      expect(
+        ui.getByRole("article", { name: "Earlier question: Who else shares this device?" }),
+      ).toBeTruthy(),
+    );
+    await waitFor(() => expect(ui.queryByRole("status")).toBeNull());
+
+    // Only the last three questions travel with a follow-up.
+    for (const question of ["Third?", "Fourth?", "Fifth?"]) {
+      ask(ui, question);
+      await waitFor(() => expect(ui.queryByRole("status")).toBeNull());
+    }
+    const request = vi.mocked(client.ask).mock.lastCall?.[1];
+    expect(request?.history?.map((turn) => turn.question)).toEqual([
+      "Is there a path between them?",
+      "Third?",
+      "Fourth?",
+    ]);
+    expect(ui.getAllByRole("article")).toHaveLength(4);
+  });
+
+  it("shows an earlier answer on the graph and starts a new conversation", async () => {
+    const client = api();
+    const ui = await openAsk(client);
+    ask(ui, "Who else shares this device?");
+    await ui.findByText("Answered");
+    ask(ui, "And then?");
+    await ui.findByRole("article");
+    await waitFor(() => expect(ui.queryByRole("status")).toBeNull());
+
+    fireEvent.click(ui.getByRole("button", { name: "Clear Evidence Highlight" }));
+    expect(highlighted("Budi")).toBeNull();
+    const earlier = within(ui.getByRole("article"));
+    fireEvent.click(earlier.getByRole("button", { name: "Show on graph" }));
+    expect(highlighted("Budi")).toBe("evidence");
+
+    fireEvent.click(ui.getByRole("button", { name: "New conversation" }));
+    expect(ui.queryByRole("article")).toBeNull();
+    expect(highlighted("Budi")).toBeNull();
+    expect(loaded("entities")).toBe("4 entities loaded");
+    expect(ui.getByText("Which entities are directly connected to Alice Tan?")).toBeTruthy();
+    ask(ui, "Who is this?");
+    expect(client.ask).toHaveBeenLastCalledWith("g1", {
+      question: "Who is this?",
+      scope: { mode: "selected_entities", entity_ids: [alice.id] },
+    });
+  });
+
+  it("shows references on the graph and clears the highlight without losing data", async () => {
+    const ui = await openAsk(api());
+    ask(ui, "Who else shares this device?");
+    await ui.findByText("Answered");
+
+    fireEvent.click(ui.getByRole("button", { name: "Clear Evidence Highlight" }));
+    expect(highlighted("Budi")).toBeNull();
+    expect(loaded("entities")).toBe("4 entities loaded");
+
+    vi.mocked(handle.focus).mockClear();
+    fireEvent.click(ui.getByRole("button", { name: "Show on Graph" }));
+    expect(highlighted("Budi")).toBe("evidence");
+    expect(handle.focus).toHaveBeenCalledWith([alice.id, device.id, budi.id]);
+
+    // A path reference highlights the whole path.
+    fireEvent.click(ui.getByRole("button", { name: "P1 · show path" }));
+    expect(highlighted("DEVICE-921")).toBe("evidence");
+    // An entity reference focuses that entity only.
+    vi.mocked(handle.center).mockClear();
+    fireEvent.click(ui.getAllByRole("button", { name: "E3" })[0]);
+    expect(highlighted("Budi")).toBe("evidence");
+    expect(highlighted("Alice Tan")).toBeNull();
+    expect(handle.center).toHaveBeenCalledWith(budi.id);
+    expect(screen.getByText(/Highlighting evidence · 1 entity · 0 relationships/)).toBeTruthy();
+
+    // A new question drops the previous answer's highlight.
+    ask(ui, "And who owns accounts?");
+    expect(highlighted("Budi")).toBeNull();
+  });
+
+  it("explains insufficient evidence", async () => {
+    const client = api({
+      ask: vi.fn().mockResolvedValue({
+        ...ANSWER,
+        status: "insufficient_evidence",
+        answer: "No matching graph evidence was found in the retrieved scope.",
+        answer_source: "no_evidence",
+        evidence: { entities: [], relationships: [], paths: [] },
+        citations: [],
+        retrieval: {
+          ...ANSWER.retrieval,
+          limitations: ['No Customer where customer_id = "C9" was found (exact match).'],
+        },
+      }),
+    });
+    const ui = await openAsk(client);
+    fireEvent.click(ui.getByRole("radio", { name: "Whole graph (bounded)" }));
+    ask(ui, "Who is C9?");
+    expect(await ui.findByText("Insufficient evidence")).toBeTruthy();
+    expect(client.ask).toHaveBeenCalledWith("g1", {
+      question: "Who is C9?",
+      scope: { mode: "bounded_graph" },
+    });
+    expect(ui.getByText(/does not support a definite answer/)).toBeTruthy();
+    expect(ui.getByText(/was found \(exact match\)/)).toBeTruthy();
+    expect(ui.queryByRole("button", { name: "Show on Graph" })).toBeNull();
+  });
+
+  it("keeps the graph when the AI service fails", async () => {
+    const client = api({
+      ask: vi.fn().mockRejectedValue(new ApiError(503, "AI_UNAVAILABLE", "down", "req-9")),
+    });
+    const ui = await openAsk(client);
+    ask(ui, "Who else shares this device?");
+    expect(await ui.findByText(/The AI service or the model provider is unavailable/)).toBeTruthy();
+    expect(ui.getByText("The loaded graph is unchanged.")).toBeTruthy();
+    expect(loaded("entities")).toBe("3 entities loaded");
+    expect(highlighted("Alice Tan")).toBeNull();
+  });
+
+  it("explains an interrupted connection instead of the browser's error", async () => {
+    const client = api({ ask: vi.fn().mockRejectedValue(new TypeError("Failed to fetch")) });
+    const ui = await openAsk(client);
+    ask(ui, "Who else shares this device?");
+    expect(await ui.findByText(/The connection to MindGraph was interrupted/)).toBeTruthy();
+    expect(ui.queryByText("Failed to fetch")).toBeNull();
+    expect(ui.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("opens from the navigation (?ask=1) without reloading the graph", async () => {
+    const client = api();
+    const { rerender } = render(
+      <GraphExplorer graphId="g1" api={client} Canvas={FakeCanvas} initialEntityId={alice.id} />,
+    );
+    await screen.findByRole("heading", { name: "Alice Tan" });
+    rerender(<GraphExplorer graphId="g1" api={client} Canvas={FakeCanvas} initialPanel="ask" />);
+    expect(screen.getByRole("complementary", { name: "Ask MindGraph" })).toBeTruthy();
+    expect(client.getNeighbors).toHaveBeenCalledTimes(1);
+    expect(client.searchEntities).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains that a model must be configured", async () => {
+    const client = api({
+      graphRagStatus: vi.fn().mockResolvedValue({ status: "not_configured", configured: false }),
+    });
+    const ui = await openAsk(client);
+    expect(await ui.findByText("A model must be configured")).toBeTruthy();
+    expect(ui.getByRole("textbox", { name: "Question" })).toHaveProperty("disabled", true);
+    expect(client.ask).not.toHaveBeenCalled();
+    // Exploration still works.
+    fireEvent.click(screen.getByText("node:A100"));
+    expect(screen.getByText("node:A100")).toBeTruthy();
   });
 });

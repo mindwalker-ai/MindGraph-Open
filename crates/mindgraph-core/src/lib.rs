@@ -12,6 +12,7 @@
 //!                  │        ── GraphStore (port)    ◄── HugeGraphStore (mindgraph-graph)
 //!                  │        ── SourceStore (port)   ◄── LocalSourceStore (mindgraph-ingestion)
 //!                  │        ── GraphBuilderAi (port) ◄── HttpGraphBuilderAi (mindgraph-ai-client)
+//!                  │        ── GraphRagAi (port)     ◄── HttpGraphRagAi (mindgraph-ai-client)
 //!                  ▼
 //!   mindgraph-ingestion (deterministic engine) ─► mindgraph-domain
 //! ```
@@ -27,6 +28,7 @@ mod executor;
 mod explorer;
 mod graph_builder;
 mod graph_projects;
+mod graphrag;
 mod ingestion;
 mod jobs;
 mod memory;
@@ -49,6 +51,14 @@ pub use graph_builder::{
 pub use error::{ApplicationError, BoxError};
 pub use graph_projects::{
     CreateGraphProject, DEFAULT_LIST_LIMIT, GraphProjectService, MAX_LIST_LIMIT,
+};
+pub use graphrag::{
+    AnswerMetadata, AnswerSource, AnswerStatus, AskQuestion, AskScope, ConversationTurn,
+    ConversationTurnContext, DEFAULT_GRAPHRAG_CONCURRENCY, DEFAULT_GRAPHRAG_TIMEOUT,
+    DisabledGraphRagAi, GraphRagAi, GraphRagAnswer, GraphRagConfig, GraphRagError, GraphRagService,
+    Interpretation, InterpretationLimits, InterpretationRequest, KnownEntityContext,
+    MAX_GRAPHRAG_CONCURRENCY, MAX_GRAPHRAG_TIMEOUT, RetrievalCompleteness, RetrievalReport,
+    Synthesis, SynthesisRequest, SynthesizedAnswer,
 };
 pub use ingestion::{
     DEFAULT_BATCH_SIZE, DEFAULT_JOB_CONCURRENCY, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_QUEUE_CAPACITY,

@@ -4,9 +4,9 @@
  * loaded graph data and never persisted (saved views are a later
  * milestone). Everything here is pure.
  *
- * Highlighting is generic (`highlight` takes any entities and
- * relationships): M6 uses it for shortest paths, and a later GraphRAG
- * milestone can reuse it for evidence subgraphs.
+ * Highlighting is generic (any entities and relationships): shortest
+ * paths use it in blue, and Ask MindGraph (M7) uses it in orange for the
+ * evidence of an answer.
  */
 
 import type { Direction, GraphPath } from "@/lib/api/types";
@@ -22,6 +22,9 @@ export interface ActivePath {
   path: GraphPath;
 }
 
+/** Why entities are highlighted: a shortest path, or an answer's evidence. */
+export type HighlightTone = "path" | "evidence";
+
 export interface InvestigationState {
   selectedEntityId: string | null;
   selectedRelationshipId: string | null;
@@ -31,6 +34,7 @@ export interface InvestigationState {
   hiddenRelationshipIds: ReadonlySet<string>;
   highlightedEntityIds: ReadonlySet<string>;
   highlightedRelationshipIds: ReadonlySet<string>;
+  highlightTone: HighlightTone;
   activePath: ActivePath | null;
   /** Entity types switched off in the view. */
   entityTypeFilters: ReadonlySet<string>;
@@ -49,6 +53,7 @@ export const initialInvestigation: InvestigationState = {
   hiddenRelationshipIds: NONE,
   highlightedEntityIds: NONE,
   highlightedRelationshipIds: NONE,
+  highlightTone: "path",
   activePath: null,
   entityTypeFilters: NONE,
   relationshipTypeFilters: NONE,
@@ -73,6 +78,8 @@ export type InvestigationAction =
   | { type: "toggleRelationshipType"; name: string }
   | { type: "showPath"; path: ActivePath }
   | { type: "highlight"; entityIds: string[]; relationshipIds: string[] }
+  /** Highlights the evidence of an answer (or one reference of it). */
+  | { type: "showEvidence"; entityIds: string[]; relationshipIds: string[] }
   | { type: "resetHighlight" }
   | { type: "setLayout"; mode: LayoutMode }
   | { type: "reset" };
@@ -180,6 +187,7 @@ export function investigationReducer(
       return {
         ...state,
         activePath: action.path,
+        highlightTone: "path",
         highlightedEntityIds: new Set(path.found ? path.entities.map((e) => e.id) : []),
         highlightedRelationshipIds: new Set(path.found ? path.relationships.map((r) => r.id) : []),
       };
@@ -188,6 +196,15 @@ export function investigationReducer(
       return {
         ...state,
         activePath: null,
+        highlightTone: "path",
+        highlightedEntityIds: new Set(action.entityIds),
+        highlightedRelationshipIds: new Set(action.relationshipIds),
+      };
+    case "showEvidence":
+      return {
+        ...state,
+        activePath: null,
+        highlightTone: "evidence",
         highlightedEntityIds: new Set(action.entityIds),
         highlightedRelationshipIds: new Set(action.relationshipIds),
       };
@@ -294,6 +311,8 @@ export const COLORS = {
   edgeDim: "#1c2129",
   edgeFocus: "#9aa2ad",
   path: "#3d8bff",
+  /** Evidence of an Ask MindGraph answer (the design's risk orange). */
+  evidence: "#ff7a45",
   /** Appended to a node colour to dim it. */
   dimAlpha: "33",
 };
@@ -349,6 +368,9 @@ export function edgeAppearance(
   const highlighted = state.highlightedRelationshipIds.has(edge);
   const strong = selected || (focus?.relationships.has(edge) ?? false);
   const label = attributes.relationshipType;
+  if (highlighted && strong && state.highlightTone === "evidence") {
+    return { hidden, color: COLORS.evidence, label, size: 2.5, zIndex: 3 };
+  }
   if (selected || (highlighted && strong)) {
     return { hidden, color: COLORS.path, label, size: 2.5, zIndex: 3 };
   }

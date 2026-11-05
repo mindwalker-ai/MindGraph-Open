@@ -1,6 +1,22 @@
 import { describe, expect, it } from "vitest";
 
-import type { Entity, GraphPath, Ontology, PropertyJson, Relationship } from "@/lib/api/types";
+import type {
+  AskResponse,
+  Entity,
+  GraphPath,
+  Ontology,
+  PropertyJson,
+  Relationship,
+} from "@/lib/api/types";
+import {
+  citationTokens,
+  evidenceSubgraph,
+  historyTurn,
+  parseAskResponse,
+  refTargets,
+  relationshipTypeCounts,
+  suggestedQuestions,
+} from "@/lib/graph/evidence";
 import { circularLayout, forceLayout, settleNewNodes } from "@/lib/graph/layout";
 import { mergeSubgraph, nodeSize, removeEntities } from "@/lib/graph/merge";
 import { buildSearchQuery, propertyChoices, searchSummary } from "@/lib/graph/search";
@@ -496,5 +512,218 @@ describe("exact entity search", () => {
     expect(searchSummary({ status: "done", query, results: [alice, budi], limit: 2 })).toMatch(
       /First 2 matches/,
     );
+  });
+});
+
+// --- Ask MindGraph evidence ------------------------------------------------------------
+
+function askPayload(): AskResponse {
+  return {
+    status: "answered",
+    answer: "Alice Tan [E1] and Budi [E3] use DEVICE-921 [E2] [R1, R2]; see [note].",
+    answer_source: "model",
+    evidence: {
+      entities: [
+        { ...alice, ref: "E1" },
+        { ...device, ref: "E2" },
+        { ...budi, ref: "E3" },
+      ],
+      relationships: [
+        { ...usesA, ref: "R1" },
+        { ...usesB, ref: "R2" },
+      ],
+      paths: [
+        {
+          ref: "P1",
+          entity_ids: [alice.id, device.id, budi.id],
+          relationship_ids: [usesA.id, usesB.id],
+        },
+      ],
+    },
+    citations: [
+      { ref: "E1", kind: "entity", id: alice.id },
+      { ref: "P1", kind: "path" },
+    ],
+    warnings: [],
+    retrieval: {
+      scope: "selected_entities",
+      plan: { operation: "shared_neighbor", shared_entity_type: "Device" },
+      operations: 3,
+      candidates_inspected: 1,
+      truncated: false,
+      context_bytes: 800,
+      limitations: [],
+    },
+    metadata: {
+      interpret_prompt_version: "graphrag_interpret_v1",
+      synthesize_prompt_version: "graphrag_synthesize_v1",
+      provider: "openai_compatible",
+      model: "m",
+      conversation_turns: 0,
+      duration_ms: 10,
+    },
+  };
+}
+
+describe("Ask MindGraph evidence", () => {
+  it("remembers the scope and the cited entities of an answered question", () => {
+    const answer = parseAskResponse(askPayload(), G);
+    // Budi first (the scope), then E1 and the entities of the cited path.
+    expect(historyTurn("Who shares it?", [budi.id], answer)).toEqual({
+      question: "Who shares it?",
+      entity_ids: [budi.id, alice.id, device.id],
+    });
+    const relationshipOnly = {
+      ...answer,
+      citations: [{ ref: "R2", kind: "relationship" as const }],
+    };
+    expect(historyTurn("Q", [], relationshipOnly).entity_ids).toEqual([budi.id, device.id]);
+    expect(historyTurn("Q", [], { ...answer, citations: [] }).entity_ids).toEqual([]);
+  });
+
+  it("accepts a well-formed answer and rejects evidence that does not hold together", () => {
+    const answer = parseAskResponse(askPayload(), G);
+    expect(answer.evidence.entities.map((e) => e.ref)).toEqual(["E1", "E2", "E3"]);
+
+    const broken: [string, (payload: AskResponse) => unknown][] = [
+      [
+        "dangling relationship",
+        (p) => ({ ...p, evidence: { ...p.evidence, entities: p.evidence.entities.slice(0, 2) } }),
+      ],
+      [
+        "path outside the evidence",
+        (p) => ({
+          ...p,
+          evidence: {
+            ...p.evidence,
+            paths: [{ ref: "P1", entity_ids: ["x", "y"], relationship_ids: ["r"] }],
+          },
+        }),
+      ],
+      [
+        "unknown citation",
+        (p) => ({ ...p, citations: [{ ref: "R9", kind: "relationship", id: "r9" }] }),
+      ],
+      ["citation of the wrong kind", (p) => ({ ...p, citations: [{ ref: "E1", kind: "path" }] })],
+      [
+        "repeated reference",
+        (p) => ({
+          ...p,
+          evidence: {
+            ...p.evidence,
+            entities: p.evidence.entities.map((e) => ({ ...e, ref: "E1" })),
+          },
+        }),
+      ],
+      [
+        "another graph",
+        (p) => ({
+          ...p,
+          evidence: { ...p.evidence, entities: [{ ...p.evidence.entities[0], graph_id: "other" }] },
+        }),
+      ],
+      ["unknown status", (p) => ({ ...p, status: "certain" })],
+    ];
+    for (const [what, mutate] of broken) {
+      expect(() => parseAskResponse(mutate(askPayload()), G), what).toThrow(MalformedGraphError);
+    }
+  });
+
+  it("maps references to the graph objects they highlight", () => {
+    const answer = askPayload();
+    expect(refTargets(answer, "E3")).toEqual({ entityIds: [budi.id], relationshipIds: [] });
+    expect(refTargets(answer, "R1")).toEqual({
+      entityIds: [alice.id, device.id],
+      relationshipIds: [usesA.id],
+    });
+    expect(refTargets(answer, "P1")).toEqual({
+      entityIds: [alice.id, device.id, budi.id],
+      relationshipIds: [usesA.id, usesB.id],
+    });
+    expect(refTargets(answer, "E9")).toBeNull();
+    const subgraph = evidenceSubgraph(answer);
+    expect(subgraph.entities[0]).toEqual(alice);
+    expect(relationshipTypeCounts(answer)).toEqual([{ type: "USES", count: 2 }]);
+  });
+
+  it("turns citation markers into references, leaving other brackets as text", () => {
+    const tokens = citationTokens(askPayload().answer, new Set(["E1", "E2", "E3", "R1", "R2"]));
+    expect(tokens).toEqual([
+      { text: "Alice Tan " },
+      { refs: ["E1"] },
+      { text: " and Budi " },
+      { refs: ["E3"] },
+      { text: " use DEVICE-921 " },
+      { refs: ["E2"] },
+      { text: " " },
+      { refs: ["R1", "R2"] },
+      { text: "; see [note]." },
+    ]);
+    expect(citationTokens("Only [E7].", new Set(["E1"]))).toEqual([{ text: "Only [E7]." }]);
+  });
+
+  it("suggests questions from the ontology, not from a fixed domain", () => {
+    const ontology: Ontology = {
+      graph_id: G,
+      version: 1,
+      entity_types: [
+        { id: "1", name: "Host", display_name: "Host", description: null, properties: [] },
+        { id: "2", name: "Alert", display_name: "Alert", description: null, properties: [] },
+      ],
+      relationship_types: [
+        {
+          id: "r",
+          name: "RAISED",
+          source_entity_type: "Host",
+          target_entity_type: "Alert",
+          properties: [],
+        },
+      ],
+    };
+    const forHost = suggestedQuestions(ontology, { entityType: "Host", label: "web-01" });
+    expect(forHost.map((s) => s.question)).toEqual([
+      "Which entities are directly connected to web-01?",
+      "Which other Host entities share an Alert with web-01?",
+      "How is web-01 connected to ",
+    ]);
+    expect(forHost.at(-1)?.submit).toBe(false);
+    expect(suggestedQuestions(ontology, { entityType: "Alert", label: "A-7" })[1].question).toBe(
+      "Which Host entities are connected to A-7 through RAISED?",
+    );
+    expect(suggestedQuestions(ontology, null)[0].question).toBe(
+      "Which Host entities share an Alert?",
+    );
+  });
+
+  it("highlights evidence in its own tone and clears it without touching data", () => {
+    const graph = loaded();
+    const state = investigationReducer(initialInvestigation, {
+      type: "showEvidence",
+      entityIds: [alice.id, device.id],
+      relationshipIds: [usesA.id],
+    });
+    expect(state.highlightTone).toBe("evidence");
+    const input = display(state);
+    const focus = emphasis(graph, input);
+    const evidence = edgeAppearance(
+      graph,
+      usesA.id,
+      graph.getEdgeAttributes(usesA.id),
+      input,
+      focus,
+    );
+    expect(evidence).toMatchObject({ color: COLORS.evidence, label: "USES" });
+    const other = edgeAppearance(graph, owns.id, graph.getEdgeAttributes(owns.id), input, focus);
+    expect(other.color).toBe(COLORS.edgeDim);
+    const cleared = investigationReducer(state, { type: "resetHighlight" });
+    expect(cleared.highlightedEntityIds.size).toBe(0);
+    expect(graph.order).toBe(3);
+    // A path highlight switches back to the path tone.
+    const path = investigationReducer(state, {
+      type: "highlight",
+      entityIds: [alice.id],
+      relationshipIds: [],
+    });
+    expect(path.highlightTone).toBe("path");
   });
 });

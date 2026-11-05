@@ -10,12 +10,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use mindgraph_core::{
     CreateGraphProject, GraphBuilderService, GraphExplorerService, GraphProjectService,
-    IngestionService, OntologyService,
+    GraphRagService, IngestionService, OntologyService,
 };
 use mindgraph_domain::GraphId;
 use serde::Serialize;
 
 use crate::SERVICE_NAME;
+use crate::ask;
 use crate::datasets;
 use crate::dto::{
     CreateGraphRequest, GraphListResponse, GraphResponse, ListGraphsQuery, OntologyResponse,
@@ -40,6 +41,9 @@ pub struct AppState {
     /// Read-only graph retrieval; `None` only in routers built without a
     /// graph store (explorer requests are then `503`).
     pub(crate) graph_explorer: Option<Arc<GraphExplorerService>>,
+    /// GraphRAG; `None` in routers built without it (questions are then
+    /// `503 AI_NOT_CONFIGURED`).
+    pub(crate) graphrag: Option<Arc<GraphRagService>>,
 }
 
 impl AppState {
@@ -56,7 +60,15 @@ impl AppState {
             ingestion: Arc::new(ingestion),
             graph_builder: None,
             graph_explorer: None,
+            graphrag: None,
         }
+    }
+
+    /// Attaches GraphRAG (Ask MindGraph).
+    #[must_use]
+    pub fn with_graphrag(mut self, graphrag: GraphRagService) -> Self {
+        self.graphrag = Some(Arc::new(graphrag));
+        self
     }
 
     /// Attaches the Graph Explorer.
@@ -128,6 +140,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/graphs/{graph_id}/paths", post(explorer::find_path))
         .route("/graphs/{graph_id}/subgraph", post(explorer::get_subgraph))
+        .route("/graphs/{graph_id}/ask", post(ask::ask))
+        .route("/graphrag/status", get(ask::status))
         .route("/jobs/{job_id}", get(datasets::get_job))
         .route("/jobs/{job_id}/events", get(datasets::job_events));
     Router::new()

@@ -8,6 +8,8 @@
  */
 
 import type {
+  AskRequest,
+  AskResponse,
   DataSource,
   Entity,
   EntitySearchQuery,
@@ -81,6 +83,10 @@ export interface ApiClient {
   ): Promise<GraphPath>;
   /** The given entities plus every relationship among them. */
   getSubgraph(graphId: string, entityIds: string[]): Promise<Subgraph>;
+  /** Ask MindGraph: a question answered from bounded graph evidence (M7). */
+  ask(graphId: string, request: AskRequest): Promise<AskResponse>;
+  /** Whether a model is configured for Ask MindGraph. */
+  graphRagStatus(): Promise<GraphBuilderStatus>;
 }
 
 type Fetch = typeof fetch;
@@ -186,6 +192,8 @@ export function createApiClient(
       ),
     getSubgraph: (graphId, entityIds) =>
       call(`/graphs/${graphId}/subgraph`, json("POST", { entity_ids: entityIds })),
+    ask: (graphId, request) => call(`/graphs/${graphId}/ask`, json("POST", request)),
+    graphRagStatus: () => call("/graphrag/status"),
   };
 }
 

@@ -214,7 +214,13 @@ export default function GraphCanvas(props: CanvasProps) {
       for (const listener of listeners) listener();
     });
 
-    const resize = new ResizeObserver(() => sigma.resize());
+    // Sigma only listens to window resizes. Panels that open or close (the
+    // side panel, Ask MindGraph) resize the container instead, and
+    // `resize()` clears the canvases, so draw again on the next frame.
+    const resize = new ResizeObserver(() => {
+      sigma.resize();
+      sigma.scheduleRender();
+    });
     resize.observe(element);
 
     /** Re-frames the graph to what is loaded now, so later additions do not shift it. */

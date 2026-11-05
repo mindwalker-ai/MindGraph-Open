@@ -23,8 +23,8 @@ class NotConfiguredError(AIServiceError):
     code = "AI_NOT_CONFIGURED"
     status_code = 503
 
-    def __init__(self) -> None:
-        super().__init__("the AI Graph Builder is not configured")
+    def __init__(self, message: str = "the AI Graph Builder is not configured") -> None:
+        super().__init__(message)
 
 
 class ProviderTimeoutError(AIServiceError):

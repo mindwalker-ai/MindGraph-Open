@@ -17,6 +17,7 @@ async-trait.workspace = true
 chrono.workspace = true
 mindgraph-domain.workspace = true
 mindgraph-graph.workspace = true
+mindgraph-graphrag.workspace = true
 mindgraph-ingestion.workspace = true
 serde.workspace = true
 serde_json.workspace = true

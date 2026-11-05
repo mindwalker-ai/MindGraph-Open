@@ -12,10 +12,10 @@ connect your AI agents through MCP.
 Data → Graph → Explore → Ask → Investigate → Connect to AI Agents
 ```
 
-> **Status: pre-alpha.** Milestones **M0** to **M6** are complete: graph
-> storage, project APIs, dataset ingestion, the AI Graph Builder and the
-> visual Graph Explorer. GraphRAG and MCP arrive in the next milestones. See
-> the [roadmap](#roadmap).
+> **Status: pre-alpha.** Milestones **M0** to **M7** are complete: graph
+> storage, project APIs, dataset ingestion, the AI Graph Builder, the visual
+> Graph Explorer and graph-first GraphRAG (Ask MindGraph). MCP arrives next.
+> See the [roadmap](#roadmap).
 
 ---
 
@@ -66,9 +66,9 @@ The AI only *suggests*. The uploaded files, their analysis profiles and the
 suggestion are stored as you go, but no ontology version and no graph data
 are written until you click **Generate Graph**, which uses the same
 endpoints as the curl examples below. When it finishes, **Explore Graph**
-opens the result in the Graph Explorer. Screens of later milestones (Ask,
-GraphRAG, MCP, templates, the demo) are shown in the navigation but disabled
-until they ship. Without an
+opens the result in the Graph Explorer. Screens of later milestones (MCP,
+templates, the demo) are shown in the navigation but disabled until they
+ship. Without an
 AI provider the builder says so and the manual path works the same way. See
 [Use the AI Graph Builder (M5)](#use-the-ai-graph-builder-m5) to configure a
 model.
@@ -99,6 +99,37 @@ from one entity's neighbourhood and grows as you expand. The browser holds at
 most 500 entities and 1,500 relationships; past that, the explorer says what
 was left out and offers to unload hidden entities or reset the view. The
 counts in the status bar are what is loaded, not totals of the graph.
+
+### Ask MindGraph (M7)
+
+In the Graph Explorer, click **Ask MindGraph** (or press A, or choose *Ask
+about this entity* in an entity's context menu). The panel opens next to the
+graph, which stays visible:
+
+```text
+Scope        "Selected · <entity>" (the most reliable) or "Whole graph
+             (bounded)"; suggested questions follow the entity's type and
+             the ontology
+Answer       MindGraph Core retrieves evidence from the graph, then the
+             model phrases an answer that cites it: [E1] entity, [R1]
+             relationship, [P1] path
+Show on      the evidence is merged into the canvas and highlighted in
+Graph        orange; click a reference to focus that entity or path;
+             "Clear Evidence Highlight" restores normal styling
+Status       Answered · Partial (a retrieval limit was hit, results may be
+             missing) · Insufficient evidence (the retrieved graph context
+             does not support an answer)
+Follow-up    ask again in the same panel: "Is there a path between them?",
+             "What about C003?". The last 3 questions and the entities they
+             cited go with it; evidence is retrieved afresh every time.
+             "New conversation" (the clock icon) forgets them
+```
+
+For the fraud example, select Alice Tan and ask *"Who else shares this
+device?"*: the evidence is Alice (C001), Budi Santoso (C002), `DEVICE-921`
+and their two `USES` relationships. Ask MindGraph needs a configured model
+(see [GraphRAG](#graphrag-ask-mindgraph-m7)); without one the panel says so
+and exploring keeps working.
 
 ### Load a dataset without AI (M4)
 
@@ -168,6 +199,19 @@ curl -s "$API/graphs/$GRAPH/entities/$ALICE/neighbors?direction=outgoing&limit=1
 curl -s -X POST $API/graphs/$GRAPH/paths -H "Content-Type: application/json" \
   -d "{\"source_id\": \"$ALICE\", \"target_id\": \"$BUDI\", \"max_depth\": 3}" \
   | jq '{found, hops, via: [.relationships[].relationship_type]}' # → 2 hops via USES, USES
+# 7. Ask MindGraph (needs a configured model): evidence first, then a cited answer.
+curl -s -X POST $API/graphs/$GRAPH/ask -H "Content-Type: application/json" \
+  -d "{\"question\": \"Who else shares this device?\",
+       \"scope\": {\"mode\": \"selected_entities\", \"entity_ids\": [\"$ALICE\"]}}" \
+  | jq '{status, answer, evidence: [.evidence.entities[] | .properties.customer_id // .properties.device_id]}'
+# → "status": "answered", evidence ["DEVICE-921", "C001", "C002"]
+# 8. A follow-up: the earlier question and the entities it cited (kept by the client).
+curl -s -X POST $API/graphs/$GRAPH/ask -H "Content-Type: application/json" \
+  -d "{\"question\": \"Is there a path between them?\",
+       \"history\": [{\"question\": \"Who else shares this device?\",
+                     \"entity_ids\": [\"$ALICE\", \"$BUDI\"]}]}" \
+  | jq '{status, plan: .retrieval.plan.operation, turns: .metadata.conversation_turns}'
+# → "status": "answered", plan "find_path", turns 1
 ```
 
 Submitting the same `Idempotency-Key` again returns the same job instead of
@@ -424,6 +468,68 @@ made when Rust rejects a suggestion. Details:
 [`docs/architecture/`](docs/architecture/README.md#ai-graph-builder-adr-007-adr-008-m5)
 and [`services/ai/README.md`](services/ai/README.md).
 
+## GraphRAG: Ask MindGraph (M7)
+
+GraphRAG in MindGraph is graph-first (ADR-010): **Python interprets and
+phrases, Rust retrieves and verifies.** No vector database is involved.
+
+```text
+question ─► AI service: interpret ─► retrieval intent (untrusted JSON, no query language)
+         ─► mindgraph-graphrag: validate against the ontology and limits ─► retrieval plan
+         ─► bounded GraphStore reads ─► evidence graph (real entities/relationships, E1/R1/P1)
+         ─► AI service: synthesize from the bounded evidence context (≤ 48 KiB)
+         ─► Rust keeps only citations of retrieved evidence ─► answer + evidence + status
+```
+
+- **Operations:** `entity_lookup` (by id, or type + exact property values),
+  `neighbors` (1–3 hops), `find_path` (shortest path, 1–6 hops) and
+  `shared_neighbor` (entities connected through a shared entity, such as
+  customers using the same device), plus `unsupported`. There is no
+  natural-language-to-Gremlin engine: the model never writes or runs a query.
+- **Scopes:** `selected_entities` (1–5 entity ids, checked to belong to the
+  graph) or `bounded_graph` discovery, which inspects at most 100 candidates
+  and says so when it stops early. A bounded search is never presented as
+  exhaustive.
+- **Limits per question:** 2,000-character question, 100 GraphStore
+  operations, 150 evidence entities, 300 evidence relationships, 48 KiB of
+  model context, `MINDGRAPH_GRAPHRAG_TIMEOUT_SECONDS` (120) end to end and
+  `MINDGRAPH_GRAPHRAG_CONCURRENCY` (2) questions at a time.
+- **Evidence:** every entity and relationship in an answer was read from the
+  GraphStore for that graph; relationships always come with both endpoints;
+  nothing is synthesised to fill gaps; nothing from an answer is ever written
+  to the graph. Citations to references that are not in the evidence are
+  removed (with a warning). A valid citation proves the cited object was
+  retrieved, not that the model's reading of it is right.
+- **Statuses:** `answered`, `partial` (a limit stopped retrieval) and
+  `insufficient_evidence` (no matching evidence, an ambiguous or missing
+  entity, no path within the depth, or the model judged the evidence
+  insufficient). Missing evidence is a normal answer, not an error.
+- **Follow-up questions (session only):** the request may carry `history`,
+  up to 3 earlier questions with up to 10 entity ids each. The browser keeps
+  the conversation; MindGraph stores nothing. Core checks the ids against
+  the graph again (others are ignored with a warning) and the model refers
+  to them as `H1`, `H2`, … (at most 10). Earlier questions only explain what
+  "they" or "what about C003?" mean: evidence is retrieved again for every
+  question, and an earlier answer is never used as evidence.
+
+**What is sent to the model:** the question; the ontology (type, property
+and relationship names); the selected entities' types and up to 24
+properties (texts cut at 200 characters); for a follow-up, the earlier
+questions and the same bounded view of the entities they cited; and, for the answer, the evidence
+context: the retrieved entities' and relationships' types and properties
+under references such as `E1`, plus what the retrieval covered. Never
+MindGraph ids, other graph data, credentials or the whole graph. Property
+values are copied from your data, so use a local model for sensitive
+graphs. Questions, prompts, property values and model output are never
+logged; logs hold ids, counts, sizes and durations.
+
+**Without a model** (`MINDGRAPH_LLM_PROVIDER` empty), `POST .../ask` returns
+`503 AI_NOT_CONFIGURED`, `GET /api/v1/graphrag/status` reports
+`not_configured`, the panel explains how to configure one, and every other
+feature keeps working. Details:
+[`docs/architecture/`](docs/architecture/README.md#graphrag-adr-010-m7) and
+[`services/ai/README.md`](services/ai/README.md).
+
 ## Dataset ingestion (M4)
 
 `crates/mindgraph-ingestion` is the deterministic dataset engine (ADR-008),
@@ -472,6 +578,8 @@ Configuration uses environment variables (ADR-013). See
 | `MINDGRAPH_AI_URL`            | core (M5) | `http://ai:8000`; unset disables AI in core |
 | `MINDGRAPH_AI_TIMEOUT_SECONDS` / `_MAX_REPAIR_ATTEMPTS` | core (M5) | `300` / `1` (0–2) |
 | `MINDGRAPH_AI_JOB_CONCURRENCY` | core (M5) | `2` (1–8); AI jobs have their own workers |
+| `MINDGRAPH_GRAPHRAG_TIMEOUT_SECONDS` | core (M7) | `120` (1–600): one Ask MindGraph question, end to end |
+| `MINDGRAPH_GRAPHRAG_CONCURRENCY` | core (M7) | `2` (1–16) questions answered at the same time |
 | `MINDGRAPH_LLM_PROVIDER`      | ai (M5)   | empty (AI disabled); `openai_compatible` |
 | `MINDGRAPH_LLM_BASE_URL` / `_MODEL` | ai (M5) | empty (required with a provider) |
 | `MINDGRAPH_LLM_API_KEY`       | ai (M5)   | empty (optional; never logged)    |
@@ -494,8 +602,8 @@ the Docker image and in CI.
 | M4        | CSV / JSON ingestion without AI                          | ✅ Done |
 | M5        | AI Graph Builder (ontology suggestion, review, generate) | ✅ Done |
 | M6        | Visual Graph Explorer (Sigma.js, Graphology)             | ✅ Done |
-| M7        | GraphRAG with evidence graphs                            | Next    |
-| M8        | MCP server for Claude, Codex and Cursor                  | Planned |
+| M7        | GraphRAG with evidence graphs (Ask MindGraph)            | ✅ Done |
+| M8        | MCP server for Claude, Codex and Cursor                  | Next    |
 | M9        | Basic entity resolution                                  | Planned |
 | M10       | Launch hardening and demos                               | Planned |
 

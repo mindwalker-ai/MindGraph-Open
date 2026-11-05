@@ -278,6 +278,8 @@ function fakeApi(status: GraphBuilderStatus["status"] = "ready"): FakeApi {
     getNeighbors: vi.fn(),
     findPath: vi.fn(),
     getSubgraph: vi.fn(),
+    ask: vi.fn(),
+    graphRagStatus: vi.fn(),
   };
 }
 

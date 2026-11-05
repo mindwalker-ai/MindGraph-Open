@@ -1029,6 +1029,70 @@ Vector storage is optional for v0.1.
 
 If needed initially, PostgreSQL + pgvector is preferred over adding another standalone vector database.
 
+## Refinement (M7)
+
+The pipeline above is implemented without the optional semantic step (no
+embeddings, no vector store):
+
+```text
+question ─► AI service /internal/v1/graphrag/interpret ─► RetrievalIntent (untrusted)
+         ─► mindgraph-graphrag: validate_intent (ontology, ids, depths) ─► RetrievalPlan
+         ─► retrieve over the GraphStore port (bounded) ─► EvidenceGraph
+         ─► build_context (references E1/R1/P1, ≤ 48 KiB)
+         ─► AI service /internal/v1/graphrag/synthesize ─► answer + cited references
+         ─► GraphRagService keeps only citations of retrieved evidence
+```
+
+- **Crates.** `mindgraph-graphrag` is a capability crate over the
+  `GraphStore` port (`mindgraph-graph` without the HugeGraph feature) and
+  `mindgraph-domain`; it has no HTTP or provider types. `mindgraph-core`
+  owns the `GraphRagAi` port and `GraphRagService` and reuses
+  `GraphExplorerService` for workspace and graph isolation.
+  `mindgraph-ai-client` implements the port over HTTP.
+- **Intent extraction and entity identification** are one structured
+  interpretation limited to four operations (`entity_lookup`, `neighbors`,
+  `find_path`, `shared_neighbor`) plus `unsupported`. The model never writes
+  a query language; Rust validates every type, property, id and depth.
+- **Scopes.** Selected entities (1-5, verified to belong to the graph) or
+  bounded discovery (at most 100 candidates). A bounded result is reported
+  as `partial`, never as exhaustive.
+- **Response.** `status` (`answered`, `partial`, `insufficient_evidence`),
+  the answer, the evidence subgraph (entities, relationships, ordered paths
+  with references), checked citations, warnings, the validated plan and
+  retrieval counters. Missing evidence is a successful
+  `insufficient_evidence` answer, not an error.
+- **Hallucination control.** The evidence graph contains only objects read
+  from the GraphStore (with both endpoints of every relationship); unknown or
+  fabricated citations are removed; an answer that cites nothing is
+  downgraded to `insufficient_evidence`. Citation checks prove that cited
+  objects were retrieved, not that the model's interpretation is right; the
+  UI shows the evidence next to the model text. Nothing from an answer is
+  written to the graph.
+- **Execution (refines ADR-006 for this endpoint).** `POST
+  /api/v1/graphs/{id}/ask` is synchronous rather than a job: questions are
+  interactive, there is no server-side conversation state, and the
+  ingestion job schema is tied to data sources. It is bounded by a per-question deadline
+  (`MINDGRAPH_GRAPHRAG_TIMEOUT_SECONDS`, default 120) and a concurrency
+  limit (`MINDGRAPH_GRAPHRAG_CONCURRENCY`, default 2), and holds no database
+  transaction while the model works. Streaming and persistent history are
+  future work.
+- **Follow-up questions (session only).** The browser keeps the
+  conversation of the Ask panel and sends up to three earlier questions in
+  `history`, each with the entity ids it was about (its scope and cited
+  entities). The server stores nothing. `GraphRagService` checks the ids
+  against the graph again (missing ones are ignored with a warning), keeps
+  at most 10 of them (newest question first) and gives them to the model as
+  references `H1`, `H2`, … next to the selected `S1`; `validate_intent`
+  resolves both. Earlier questions reach the synthesis only as context for
+  what the question refers to: evidence is retrieved afresh for every
+  question and an earlier answer is never evidence. Persisting
+  conversations across sessions needs its own decision (privacy,
+  retention).
+- **Internal endpoints (refines ADR-007).** `/internal/v1/graphrag/interpret`
+  and `/internal/v1/graphrag/synthesize`, prompts `graphrag_interpret_v1` and
+  `graphrag_synthesize_v1`, reusing the M5 OpenAI-compatible provider, retry
+  policy and error categories.
+
 ---
 
 # ADR-011: MCP Server Architecture
