@@ -2,7 +2,8 @@
 //!
 //! `mindgraph-core` runs use cases on top of `mindgraph-domain`. It reaches
 //! infrastructure only through ports, so every entry point shares one
-//! implementation of every use case. The MCP server (`mindgraph-mcp`) uses
+//! implementation of every use case (entity resolution matching lives in the
+//! pure `mindgraph-entity-resolution` crate). The MCP server (`mindgraph-mcp`) uses
 //! them through the HTTP API, not as a crate dependency (ADR-011, M8):
 //!
 //! ```text
@@ -14,6 +15,7 @@
 //!                  │        ── SourceStore (port)   ◄── LocalSourceStore (mindgraph-ingestion)
 //!                  │        ── GraphBuilderAi (port) ◄── HttpGraphBuilderAi (mindgraph-ai-client)
 //!                  │        ── GraphRagAi (port)     ◄── HttpGraphRagAi (mindgraph-ai-client)
+//!                  │        ── EntityResolutionStore (port) ◄── PostgresEntityResolutionStore (mindgraph-metadata)
 //!                  ▼
 //!   mindgraph-ingestion (deterministic engine) ─► mindgraph-domain
 //! ```
@@ -35,6 +37,9 @@ mod jobs;
 mod memory;
 mod metadata;
 mod ontology;
+mod resolution;
+mod resolution_memory;
+mod resolution_store;
 
 pub use ai::{
     AiError, AiMetadata, AiStatus, AiSuggestion, DatasetContext, DatasetMapping,
@@ -72,6 +77,23 @@ pub use jobs::{
 };
 pub use memory::MemoryMetadataStore;
 pub use metadata::{DataSourceRecord, LOCAL_WORKSPACE_NAME, MetadataStore, MetadataStoreError};
+/// The pure matching vocabulary (rules, evidence, identity groups) used by
+/// the resolution use cases, re-exported for adapters and transports.
+pub use mindgraph_entity_resolution as matching;
 pub use ontology::{
     EntityTypeInput, OntologyDefinition, OntologyService, PropertyInput, RelationshipTypeInput,
+};
+pub use resolution::{
+    CandidateDetail, DEFAULT_CANDIDATE_PAGE, DEFAULT_SCAN_CONCURRENCY, DEFAULT_SCAN_ENTITIES,
+    DEFAULT_SCAN_TIMEOUT, DecisionRequest, DecisionResult, EntityResolutionConfig,
+    EntityResolutionService, IdentityView, MAX_CANDIDATE_PAGE, MAX_SCAN_ENTITIES, MAX_SCAN_HISTORY,
+    MIN_SCAN_ENTITIES, ResolutionError, ScanRequest,
+};
+pub use resolution_memory::MemoryEntityResolutionStore;
+pub use resolution_store::{
+    CandidateCounts, CandidatePage, CandidateQuery, CandidateStatus, DecisionCommand, DecisionKind,
+    DecisionOutcome, EntityResolutionStore, IdentityMembership, LOCAL_ACTOR, NewCandidate, Repeat,
+    ResolutionCandidate, ResolutionDecision, ResolutionScan, ResolutionStoreError, SkippedPairs,
+    StoredIdentityGroup, check_new_candidates, check_repeat, decision_record, linked_pair_conflict,
+    linked_sides, plan_same_entity, rejected_pair_conflict,
 };

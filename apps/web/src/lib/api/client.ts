@@ -10,9 +10,15 @@
 import type {
   AskRequest,
   AskResponse,
+  CandidateDetail,
+  CandidatePage,
+  CandidateQuery,
   DataSource,
+  DecisionRequest,
+  DecisionResponse,
   Entity,
   EntitySearchQuery,
+  EntityIdentity,
   EntitySearchResult,
   GraphBuilderStatus,
   GraphPath,
@@ -24,6 +30,8 @@ import type {
   Ontology,
   OntologyDraft,
   PathOptions,
+  ResolutionScan,
+  ScanRequest,
   Subgraph,
 } from "./types";
 
@@ -87,6 +95,22 @@ export interface ApiClient {
   ask(graphId: string, request: AskRequest): Promise<AskResponse>;
   /** Whether a model is configured for Ask MindGraph. */
   graphRagStatus(): Promise<GraphBuilderStatus>;
+  /** Runs a bounded duplicate scan over one entity type (M9). */
+  runResolutionScan(graphId: string, request: ScanRequest): Promise<ResolutionScan>;
+  /** The graph's most recent scans, newest first. */
+  listResolutionScans(graphId: string, limit?: number): Promise<ResolutionScan[]>;
+  /** One page of the review queue, highest score first. */
+  listResolutionCandidates(graphId: string, query?: CandidateQuery): Promise<CandidatePage>;
+  /** A candidate with both original entities and its decision history. */
+  getResolutionCandidate(graphId: string, candidateId: string): Promise<CandidateDetail>;
+  /** Records a review decision (a logical identity mapping, never a graph merge). */
+  decideResolutionCandidate(
+    graphId: string,
+    candidateId: string,
+    request: DecisionRequest,
+  ): Promise<DecisionResponse>;
+  /** The logical identity group of an entity. */
+  getEntityIdentity(graphId: string, entityId: string): Promise<EntityIdentity>;
 }
 
 type Fetch = typeof fetch;
@@ -194,6 +218,31 @@ export function createApiClient(
       call(`/graphs/${graphId}/subgraph`, json("POST", { entity_ids: entityIds })),
     ask: (graphId, request) => call(`/graphs/${graphId}/ask`, json("POST", request)),
     graphRagStatus: () => call("/graphrag/status"),
+    runResolutionScan: (graphId, request) =>
+      call(`/graphs/${graphId}/resolution/scans`, json("POST", request)),
+    listResolutionScans: async (graphId, limit) =>
+      (
+        await call<{ data: ResolutionScan[] }>(
+          `/graphs/${graphId}/resolution/scans${limit === undefined ? "" : `?limit=${limit}`}`,
+        )
+      ).data,
+    listResolutionCandidates: (graphId, query = {}) => {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined && value !== "") params.set(key, String(value));
+      }
+      const suffix = params.size ? `?${params}` : "";
+      return call(`/graphs/${graphId}/resolution/candidates${suffix}`);
+    },
+    getResolutionCandidate: (graphId, candidateId) =>
+      call(`/graphs/${graphId}/resolution/candidates/${encodeURIComponent(candidateId)}`),
+    decideResolutionCandidate: (graphId, candidateId, request) =>
+      call(
+        `/graphs/${graphId}/resolution/candidates/${encodeURIComponent(candidateId)}/decisions`,
+        json("POST", request),
+      ),
+    getEntityIdentity: (graphId, entityId) =>
+      call(`/graphs/${graphId}/resolution/entities/${encodeURIComponent(entityId)}`),
   };
 }
 

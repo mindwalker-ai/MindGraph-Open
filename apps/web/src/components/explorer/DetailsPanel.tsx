@@ -23,7 +23,9 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { IdentityCard } from "@/components/explorer/IdentityCard";
 import { Button, Kicker, inputClass } from "@/components/ui/primitives";
+import type { ApiClient } from "@/lib/api/client";
 import {
   DIRECTIONS,
   type Direction,
@@ -255,6 +257,10 @@ export interface EntityDetailsProps {
   onClose(): void;
   onOpenEntity(entityId: string): void;
   onSelectRelationship(relationshipId: string): void;
+  /** With both, the panel shows the entity's logical identity and pending
+   * duplicate candidates (M9). */
+  graphId?: string;
+  api?: ApiClient;
 }
 
 export function EntityDetails(props: EntityDetailsProps) {
@@ -337,6 +343,14 @@ export function EntityDetails(props: EntityDetailsProps) {
           onChange={props.onOptions}
         />
       </div>
+      {props.api && props.graphId && (
+        <IdentityCard
+          api={props.api}
+          graphId={props.graphId}
+          entityId={node.id}
+          onOpenEntity={props.onOpenEntity}
+        />
+      )}
       <PropertyList properties={node.properties} types={node.entity.property_types} />
       <section className="flex flex-col gap-2 px-4 py-3">
         <div className="flex items-center justify-between">

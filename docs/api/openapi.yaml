@@ -29,6 +29,16 @@ info:
     query language, and nothing is ever written to the graph. Missing
     evidence is a `200` with `status: insufficient_evidence`.
 
+    Entity resolution (M9) finds potential duplicate entities of one type
+    with deterministic rules (exact identifiers, normalized email, phone
+    and text, fuzzy names), in a bounded scan that reports its coverage.
+    A person reviews every candidate. Approving one records a logical
+    identity mapping with provenance in PostgreSQL. It never merges,
+    deletes or rewires graph entities, so the Graph Explorer, GraphRAG and
+    MCP keep returning the original records (`physical_graph_merged` is
+    always `false`). Candidate scores rank review work; they are not
+    probabilities.
+
     Dataset ingestion (M4) is deterministic and needs no AI service:
     define an ontology, upload a CSV or JSON file, analyse it (an
     asynchronous job), then submit a mapping (another job). Jobs are
@@ -52,6 +62,8 @@ tags:
     description: Read-only, bounded graph exploration (M6).
   - name: graphrag
     description: Ask MindGraph, graph-first question answering with evidence (M7, optional).
+  - name: entity-resolution
+    description: Bounded duplicate scans, human review and logical identity groups (M9).
 paths:
   /health:
     get:
@@ -726,6 +738,221 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/graphs/{graph_id}/resolution/scans:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    post:
+      tags: [entity-resolution]
+      operationId: createResolutionScan
+      summary: Run a bounded duplicate scan over one entity type
+      description: |
+        Reads at most `max_entities` entities of the type (the first in id
+        order) through the GraphStore, compares at most 20,000 blocked pairs
+        within 30 seconds, and stores the new pending candidates. Pairs that
+        are already pending, were rejected earlier or are already linked are
+        skipped and counted. Every limit that cut the scan short is reported;
+        `exhaustive` is `true` only when none did. Nothing is written to the
+        graph. The body is limited to 16 KiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolutionScanRequest" }
+            example:
+              entity_type: Customer
+              max_entities: 400
+              rules:
+                - { property: customer_id, kind: exact_identifier }
+                - { property: email, kind: normalized_email }
+                - { property: phone, kind: normalized_phone, country: ID }
+                - { property: name, kind: fuzzy_name, threshold: 0.9 }
+      responses:
+        "201":
+          description: The stored scan and its coverage.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+            Location:
+              description: The URL of the scan.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolutionScan" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [entity-resolution]
+      operationId: listResolutionScans
+      summary: The graph's most recent scans
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Scans, newest first.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ResolutionScan" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/resolution/scans/{scan_id}:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/ScanId"
+    get:
+      tags: [entity-resolution]
+      operationId: getResolutionScan
+      summary: Read one scan, its rule snapshot and coverage
+      responses:
+        "200":
+          description: The scan.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolutionScan" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/resolution/candidates:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+    get:
+      tags: [entity-resolution]
+      operationId: listResolutionCandidates
+      summary: The review queue
+      description: |
+        Ordered by `score` (highest first), then `id`. Keyset pagination:
+        pass `next_cursor` as `cursor`. `counts` are per status under the
+        `scan_id` and `entity_id` filters.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, accepted, rejected, all] }
+        - name: scan_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: entity_id
+          in: query
+          description: Only candidates involving this entity.
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: One page of candidates.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolutionCandidatePage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/resolution/candidates/{candidate_id}:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/CandidateId"
+    get:
+      tags: [entity-resolution]
+      operationId: getResolutionCandidate
+      summary: A candidate with both original entities and its decisions
+      description: |
+        The entities are read from the GraphStore as stored (`null` when one
+        no longer exists). A candidate of another graph is
+        `404 CANDIDATE_NOT_FOUND`.
+      responses:
+        "200":
+          description: The candidate detail.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolutionCandidateDetail" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/resolution/candidates/{candidate_id}/decisions:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/CandidateId"
+    post:
+      tags: [entity-resolution]
+      operationId: decideResolutionCandidate
+      summary: Record a review decision (a logical identity mapping, never a merge)
+      description: |
+        `same_entity` needs `canonical_entity_id`, any member of the
+        resulting identity group, chosen by the reviewer. It writes the
+        decision and the identity mapping atomically in PostgreSQL; the
+        graph is not changed. Repeating the latest decision returns it
+        (`200`, `replayed: true`). Changing a decision is
+        `409 DECISION_CONFLICT`, except a rejected candidate with
+        `reconsider: true`. Linking entities that an earlier review marked
+        different, or rejecting linked entities, is `409 IDENTITY_CONFLICT`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+            examples:
+              same:
+                value:
+                  decision: same_entity
+                  canonical_entity_id: 019a6f3d-1c2b-7a4e-9f10-2b3c4d5e6f70
+              different:
+                value: { decision: different_entities }
+      responses:
+        "200":
+          description: An identical earlier decision (idempotent replay).
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolutionDecisionResponse" }
+        "201":
+          description: The recorded decision.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolutionDecisionResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/graphs/{graph_id}/resolution/entities/{entity_id}:
+    parameters:
+      - $ref: "#/components/parameters/GraphId"
+      - $ref: "#/components/parameters/EntityId"
+    get:
+      tags: [entity-resolution]
+      operationId: getEntityIdentity
+      summary: The logical identity group of an entity
+      description: |
+        An entity in no group is its own canonical entity
+        (`resolved: false`). Other endpoints never substitute canonical ids.
+      responses:
+        "200":
+          description: The identity.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EntityIdentity" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/graphrag/status:
     get:
       tags: [graphrag]
@@ -830,6 +1057,18 @@ components:
       required: true
       description: A job id (UUIDv7). Anything else is `400 INVALID_JOB_ID`.
       schema: { type: string, format: uuid }
+    ScanId:
+      name: scan_id
+      in: path
+      required: true
+      description: A resolution scan id (UUIDv7). Anything else is `400 INVALID_SCAN_ID`.
+      schema: { type: string, format: uuid }
+    CandidateId:
+      name: candidate_id
+      in: path
+      required: true
+      description: A resolution candidate id (UUIDv7). Anything else is `400 INVALID_CANDIDATE_ID`.
+      schema: { type: string, format: uuid }
   headers:
     RequestId:
       description: The request id, echoed from the request or generated (UUIDv7).
@@ -847,6 +1086,11 @@ components:
         `METHOD_NOT_ALLOWED` (405), `CONFLICT` (409), `PAYLOAD_TOO_LARGE` (413),
         `UNSUPPORTED_MEDIA_TYPE`, `UNSUPPORTED_FILE_TYPE` (415),
         `INVALID_QUESTION`, `INVALID_SCOPE`, `INVALID_HISTORY` (400, M7),
+        `UNKNOWN_ENTITY_TYPE`, `INVALID_RULE`, `INVALID_DECISION`,
+        `INVALID_CURSOR`, `INVALID_SCAN_ID`, `INVALID_CANDIDATE_ID` (400, M9),
+        `SCAN_NOT_FOUND`, `CANDIDATE_NOT_FOUND` (404, M9),
+        `DECISION_CONFLICT`, `IDENTITY_CONFLICT`, `ENTITY_UNAVAILABLE` (409, M9),
+        `RESOLUTION_SCAN_TIMEOUT` (504, M9),
         `VALIDATION_FAILED`, `INVALID_MAPPING`, `INVALID_RETRIEVAL_PLAN`,
         `RETRIEVAL_LIMIT_EXCEEDED` (422), `INTERNAL_ERROR` (500),
         `AI_INVALID_RESPONSE` (502),
@@ -1572,3 +1816,246 @@ components:
           items: { type: string }
         retrieval: { $ref: "#/components/schemas/RetrievalReport" }
         metadata: { $ref: "#/components/schemas/AnswerMetadata" }
+    ResolutionRule:
+      type: object
+      additionalProperties: false
+      required: [property, kind]
+      properties:
+        property: { type: string, description: A property of the scanned entity type in the active ontology. }
+        kind:
+          type: string
+          enum: [exact_identifier, normalized_email, normalized_phone, normalized_string, fuzzy_name]
+        threshold:
+          type: number
+          minimum: 0.5
+          maximum: 1
+          description: "`fuzzy_name` only (default 0.9). A heuristic cut-off, not a probability."
+        country:
+          type: string
+          description: "`normalized_phone` only: ISO 3166-1 alpha-2 region of numbers written without `+country`."
+        case_insensitive_local_part:
+          type: boolean
+          description: "`normalized_email` only (default true): count local parts that differ only in letter case, as a weaker match."
+    StoredResolutionRule:
+      allOf:
+        - $ref: "#/components/schemas/ResolutionRule"
+        - type: object
+          required: [property_type]
+          properties:
+            property_type: { $ref: "#/components/schemas/PropertyType" }
+    ResolutionScanRequest:
+      type: object
+      additionalProperties: false
+      required: [entity_type, rules]
+      properties:
+        entity_type: { type: string }
+        max_entities: { type: integer, minimum: 2, maximum: 999, default: 400 }
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { $ref: "#/components/schemas/ResolutionRule" }
+    ScanWarning:
+      type: object
+      required: [code, property, rule, count]
+      description: A data-quality finding. Counts and names only, never values.
+      properties:
+        code:
+          type: string
+          enum: [oversized_blocks, invalid_values, missing_country, integer_phone, values_too_long, type_mismatch]
+        property: { type: string }
+        rule: { type: string }
+        count: { type: integer }
+    ResolutionScan:
+      type: object
+      required:
+        [scan_id, graph_id, entity_type, ontology_version, rules, max_entities, entities_examined,
+         truncated, pairs_compared, comparison_budget, comparison_budget_reached, oversized_blocks,
+         candidate_limit_reached, candidates_found, skipped, exhaustive, warnings, duration_ms, created_at]
+      properties:
+        scan_id: { type: string, format: uuid }
+        graph_id: { type: string, format: uuid }
+        entity_type: { type: string }
+        ontology_version: { type: integer, minimum: 1 }
+        rules:
+          type: array
+          description: The rule snapshot used; later rule changes never rewrite it.
+          items: { $ref: "#/components/schemas/StoredResolutionRule" }
+        max_entities: { type: integer }
+        entities_examined: { type: integer }
+        truncated: { type: boolean, description: More entities of the type exist than were examined. }
+        pairs_compared: { type: integer }
+        comparison_budget: { type: integer }
+        comparison_budget_reached: { type: boolean }
+        oversized_blocks: { type: integer, description: Blocks of more than 50 entities skipped. }
+        candidate_limit_reached: { type: boolean }
+        candidates_found: { type: integer, description: New pending candidates stored by this scan. }
+        skipped:
+          type: object
+          required: [already_pending, previously_rejected, already_linked]
+          properties:
+            already_pending: { type: integer }
+            previously_rejected: { type: integer }
+            already_linked: { type: integer }
+        exhaustive: { type: boolean, description: Every entity examined and no limit reached. }
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/ScanWarning" }
+        duration_ms: { type: integer }
+        created_at: { type: string, format: date-time }
+    MatchSignal:
+      type: object
+      required: [property, rule, outcome, matched, weight]
+      description: The evidence of one rule for one pair. Never contains property values.
+      properties:
+        property: { type: string }
+        rule: { type: string }
+        outcome:
+          type: string
+          enum: [exact, normalized, fuzzy, no_match, missing, unavailable]
+        matched: { type: boolean }
+        similarity: { type: number, description: "Name similarity between 0 and 1 (fuzzy rules)." }
+        weight: { type: number, description: This signal's weight in the score; 0 when it did not match. }
+        note:
+          type: string
+          enum: [initials_matched, case_insensitive_local_part, invalid_value, missing_country, integer_phone, value_too_long, type_mismatch]
+    ResolutionCandidate:
+      type: object
+      required:
+        [id, scan_id, graph_id, entity_type, entity_a_id, entity_b_id, score, signals, matched_rules,
+         status, created_at, updated_at, decided_at]
+      properties:
+        id: { type: string, format: uuid }
+        scan_id: { type: string, format: uuid }
+        graph_id: { type: string, format: uuid }
+        entity_type: { type: string }
+        entity_a_id: { type: string, format: uuid, description: The smaller entity id of the pair. }
+        entity_b_id: { type: string, format: uuid }
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: A deterministic ranking heuristic for review order. Not a probability.
+        signals:
+          type: array
+          items: { $ref: "#/components/schemas/MatchSignal" }
+        matched_rules:
+          type: array
+          items: { type: string, example: "normalized_email:email" }
+        status: { type: string, enum: [pending, accepted, rejected] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        decided_at: { type: [string, "null"], format: date-time }
+    ResolutionCandidatePage:
+      type: object
+      required: [data, next_cursor, limit, counts]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ResolutionCandidate" }
+        next_cursor: { type: [string, "null"], format: uuid }
+        limit: { type: integer }
+        counts:
+          type: object
+          required: [pending, accepted, rejected]
+          properties:
+            pending: { type: integer }
+            accepted: { type: integer }
+            rejected: { type: integer }
+    ResolutionDecision:
+      type: object
+      description: An immutable review decision and its provenance.
+      required:
+        [id, candidate_id, scan_id, decision, entity_a_id, entity_b_id, canonical_entity_id,
+         previous_canonical_entity_ids, linked_entity_ids, score, matched_rules, actor, reconsidered,
+         created_at]
+      properties:
+        id: { type: string, format: uuid }
+        candidate_id: { type: string, format: uuid }
+        scan_id: { type: string, format: uuid }
+        decision: { type: string, enum: [same_entity, different_entities] }
+        entity_a_id: { type: string, format: uuid }
+        entity_b_id: { type: string, format: uuid }
+        canonical_entity_id: { type: [string, "null"], format: uuid }
+        previous_canonical_entity_ids:
+          type: array
+          items: { type: string, format: uuid }
+        linked_entity_ids:
+          type: array
+          description: Members whose identity mapping this decision wrote.
+          items: { type: string, format: uuid }
+        score: { type: number }
+        matched_rules:
+          type: array
+          items: { type: string }
+        actor: { type: string, example: local-user }
+        reconsidered: { type: boolean }
+        created_at: { type: string, format: date-time }
+    EntityIdentity:
+      type: object
+      required:
+        [entity_id, canonical_entity_id, member_entity_ids, is_canonical, resolved, resolution_type,
+         entity_type, members, physical_graph_merged]
+      properties:
+        entity_id: { type: string, format: uuid }
+        canonical_entity_id: { type: string, format: uuid }
+        member_entity_ids:
+          type: array
+          items: { type: string, format: uuid }
+        is_canonical: { type: boolean }
+        resolved: { type: boolean, description: Whether the entity belongs to an identity group. }
+        resolution_type: { type: [string, "null"], enum: [manual, null] }
+        entity_type: { type: [string, "null"] }
+        members:
+          type: array
+          items:
+            type: object
+            required: [entity_id, decision_id, linked_at]
+            properties:
+              entity_id: { type: string, format: uuid }
+              decision_id: { type: string, format: uuid }
+              linked_at: { type: string, format: date-time }
+        physical_graph_merged:
+          type: boolean
+          const: false
+          description: Always false. Identity is metadata; the graph keeps every original entity.
+    ResolutionCandidateDetail:
+      type: object
+      required: [candidate, entity_a, entity_b, identity_a, identity_b, decisions]
+      properties:
+        candidate: { $ref: "#/components/schemas/ResolutionCandidate" }
+        entity_a:
+          oneOf:
+            - $ref: "#/components/schemas/Entity"
+            - type: "null"
+        entity_b:
+          oneOf:
+            - $ref: "#/components/schemas/Entity"
+            - type: "null"
+        identity_a: { $ref: "#/components/schemas/EntityIdentity" }
+        identity_b: { $ref: "#/components/schemas/EntityIdentity" }
+        decisions:
+          type: array
+          items: { $ref: "#/components/schemas/ResolutionDecision" }
+    ResolutionDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [same_entity, different_entities] }
+        canonical_entity_id:
+          type: string
+          format: uuid
+          description: Required with `same_entity`, forbidden with `different_entities`.
+        reconsider:
+          type: boolean
+          default: false
+          description: Accept a candidate that was rejected earlier.
+    ResolutionDecisionResponse:
+      type: object
+      required: [decision, candidate, identity, replayed]
+      properties:
+        decision: { $ref: "#/components/schemas/ResolutionDecision" }
+        candidate: { $ref: "#/components/schemas/ResolutionCandidate" }
+        identity: { $ref: "#/components/schemas/EntityIdentity" }
+        replayed: { type: boolean }

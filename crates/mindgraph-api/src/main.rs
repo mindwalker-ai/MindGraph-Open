@@ -6,6 +6,7 @@
 //!        → <data dir>/sources ─► LocalSourceStore ──────────────┴──┴► IngestionService
 //!        → MINDGRAPH_AI_URL ─► HttpGraphBuilderAi (or AI disabled) ─► GraphBuilderService
 //!                          ─► HttpGraphRagAi (or AI disabled) ─► GraphRagService (+ explorer reads)
+//!        → PostgresEntityResolutionStore (same pool) ─► EntityResolutionService (+ explorer reads)
 //!        → restart recovery (fail cut-off jobs) → router → serve
 //! ```
 //!
@@ -21,9 +22,10 @@ use std::sync::Arc;
 use mindgraph_ai_client::{HttpGraphBuilderAi, HttpGraphRagAi};
 use mindgraph_api::{AppState, Config, SERVICE_NAME, router};
 use mindgraph_core::{
-    DisabledGraphBuilderAi, DisabledGraphRagAi, GraphBuilderAi, GraphBuilderConfig,
-    GraphBuilderService, GraphExplorerService, GraphProjectService, GraphRagAi, GraphRagConfig,
-    GraphRagService, IngestionPorts, IngestionService, MetadataStore, OntologyService,
+    DisabledGraphBuilderAi, DisabledGraphRagAi, EntityResolutionConfig, EntityResolutionService,
+    EntityResolutionStore, GraphBuilderAi, GraphBuilderConfig, GraphBuilderService,
+    GraphExplorerService, GraphProjectService, GraphRagAi, GraphRagConfig, GraphRagService,
+    IngestionPorts, IngestionService, MetadataStore, OntologyService,
 };
 use mindgraph_graph::{GraphStore, HugeGraphConfig, HugeGraphStore};
 use mindgraph_ingestion::LocalSourceStore;
@@ -61,6 +63,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     store.migrate().await?;
     tracing::info!("database migrations applied");
 
+    // Entity resolution metadata (M9) lives in the same database.
+    let resolution_store: Arc<dyn EntityResolutionStore> =
+        Arc::new(store.entity_resolution_store());
     let metadata: Arc<dyn MetadataStore> = Arc::new(store);
 
     // One HugeGraph adapter, shared by ingestion (writes) and the explorer (reads).
@@ -88,6 +93,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(url) => Arc::new(HttpGraphRagAi::new(url, config.ai.graphrag_timeout)?),
         None => Arc::new(DisabledGraphRagAi),
     };
+    // Logical identity only: the service reads the graph, never writes it.
+    let entity_resolution = EntityResolutionService::new(
+        graph_explorer.clone(),
+        resolution_store,
+        EntityResolutionConfig::default(),
+    );
     let graphrag = GraphRagService::new(
         graph_explorer.clone(),
         graphrag_ai,
@@ -121,7 +132,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         AppState::new(graph_projects, ontology, ingestion)
             .with_graph_builder(graph_builder)
             .with_graph_explorer(graph_explorer)
-            .with_graphrag(graphrag),
+            .with_graphrag(graphrag)
+            .with_entity_resolution(entity_resolution),
     );
 
     let listener = TcpListener::bind(config.bind_addr).await?;

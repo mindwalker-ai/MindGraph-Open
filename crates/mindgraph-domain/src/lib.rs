@@ -70,7 +70,7 @@ pub use error::DomainError;
 pub use graph_project::{GraphProject, GraphStatus};
 pub use id::{
     DataSourceId, EntityId, EntityTypeId, GraphId, IngestionJobId, RelationshipId,
-    RelationshipTypeId, WorkspaceId,
+    RelationshipTypeId, ResolutionCandidateId, ResolutionDecisionId, ResolutionScanId, WorkspaceId,
 };
 pub use name::{PropertyKey, TypeName};
 pub use ontology::{Ontology, OntologyVersion};

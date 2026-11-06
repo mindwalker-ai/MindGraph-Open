@@ -12,6 +12,7 @@ import {
   Box,
   ChevronsUpDown,
   CodeXml,
+  CopyCheck,
   Database,
   type LucideIcon,
   MessageSquareText,
@@ -74,6 +75,11 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
         icon: Network,
         href: (graphId) => (graphId ? `/graphs/${graphId}/builder` : null),
       },
+      {
+        label: "Resolution",
+        icon: CopyCheck,
+        href: (graphId) => (graphId ? `/graphs/${graphId}/resolution` : null),
+      },
     ],
   },
   {
@@ -113,7 +119,10 @@ function useHost(): string {
 
 function disabledTitle(item: NavItem, graphId?: string): string {
   if (item.milestone) return comingIn(item.milestone);
-  if (!graphId && ["Graph", "Ask", "GraphRAG", "MCP", "Sources", "Ontology"].includes(item.label)) {
+  if (
+    !graphId &&
+    ["Graph", "Ask", "GraphRAG", "MCP", "Sources", "Ontology", "Resolution"].includes(item.label)
+  ) {
     return "Open a graph first";
   }
   return comingIn();

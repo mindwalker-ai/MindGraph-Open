@@ -29,7 +29,7 @@ pub(crate) struct ListGraphsQuery {
     pub(crate) limit: Option<usize>,
 }
 
-fn timestamp(at: DateTime<Utc>) -> String {
+pub(crate) fn timestamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 

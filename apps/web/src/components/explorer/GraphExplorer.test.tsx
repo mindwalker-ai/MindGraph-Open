@@ -271,6 +271,27 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}): ApiClie
     getSubgraph: vi.fn().mockResolvedValue({ entities: [], relationships: [] }),
     graphRagStatus: vi.fn().mockResolvedValue({ status: "ready", configured: true }),
     ask: vi.fn().mockResolvedValue(ANSWER),
+    runResolutionScan: vi.fn(),
+    listResolutionScans: vi.fn().mockResolvedValue([]),
+    listResolutionCandidates: vi.fn().mockResolvedValue({
+      data: [],
+      next_cursor: null,
+      limit: 3,
+      counts: { pending: 0, accepted: 0, rejected: 0 },
+    }),
+    getResolutionCandidate: vi.fn(),
+    decideResolutionCandidate: vi.fn(),
+    getEntityIdentity: vi.fn(async (_g: string, id: string) => ({
+      entity_id: id,
+      canonical_entity_id: id,
+      member_entity_ids: [id],
+      is_canonical: true,
+      resolved: false,
+      resolution_type: null,
+      entity_type: null,
+      members: [],
+      physical_graph_merged: false,
+    })),
     ...overrides,
   } as ApiClient;
 }

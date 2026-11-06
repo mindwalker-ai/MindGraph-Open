@@ -12,7 +12,7 @@ use axum::Extension;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use mindgraph_core::{ApplicationError, GraphRagError};
+use mindgraph_core::{ApplicationError, GraphRagError, ResolutionError};
 use tracing::{error, warn};
 
 /// The code and message of an error response, rendered into the envelope by
@@ -136,6 +136,7 @@ impl From<ApplicationError> for ApiError {
                 "The AI service is unavailable; try again later or continue manually",
             ),
             ApplicationError::GraphRag(error) => Self::from(error),
+            ApplicationError::Resolution(error) => Self::from(error),
             ApplicationError::Unavailable(source) => {
                 warn!(error = %source, "a required backend is unavailable");
                 Self::new(
@@ -211,6 +212,52 @@ impl From<GraphRagError> for ApiError {
     }
 }
 
+impl From<ResolutionError> for ApiError {
+    fn from(error: ResolutionError) -> Self {
+        // Messages name entity types, properties, rule kinds, ids and limits;
+        // never property values.
+        let message = error.to_string();
+        match error {
+            ResolutionError::UnknownEntityType(_) => {
+                Self::new(StatusCode::BAD_REQUEST, "UNKNOWN_ENTITY_TYPE", message)
+            }
+            ResolutionError::InvalidRule(_) => {
+                Self::new(StatusCode::BAD_REQUEST, "INVALID_RULE", message)
+            }
+            ResolutionError::ScanNotFound(_) => Self::new(
+                StatusCode::NOT_FOUND,
+                "SCAN_NOT_FOUND",
+                "Resolution scan was not found",
+            ),
+            ResolutionError::CandidateNotFound(_) => Self::new(
+                StatusCode::NOT_FOUND,
+                "CANDIDATE_NOT_FOUND",
+                "Resolution candidate was not found",
+            ),
+            ResolutionError::InvalidDecision(_) => {
+                Self::new(StatusCode::BAD_REQUEST, "INVALID_DECISION", message)
+            }
+            ResolutionError::DecisionConflict(_) => {
+                Self::new(StatusCode::CONFLICT, "DECISION_CONFLICT", message)
+            }
+            ResolutionError::IdentityConflict(_) => {
+                Self::new(StatusCode::CONFLICT, "IDENTITY_CONFLICT", message)
+            }
+            ResolutionError::EntityUnavailable(_) => {
+                Self::new(StatusCode::CONFLICT, "ENTITY_UNAVAILABLE", message)
+            }
+            ResolutionError::InvalidCursor => {
+                Self::new(StatusCode::BAD_REQUEST, "INVALID_CURSOR", message)
+            }
+            ResolutionError::ScanTimeout(_) => Self::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "RESOLUTION_SCAN_TIMEOUT",
+                format!("{message}; scan fewer entities or use fewer rules"),
+            ),
+        }
+    }
+}
+
 impl From<JsonRejection> for ApiError {
     fn from(rejection: JsonRejection) -> Self {
         match rejection {
@@ -218,6 +265,12 @@ impl From<JsonRejection> for ApiError {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "UNSUPPORTED_MEDIA_TYPE",
                 "Expected `Content-Type: application/json`",
+            ),
+            // A body over the route's limit is not malformed JSON.
+            other if other.status() == StatusCode::PAYLOAD_TOO_LARGE => Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+                "The request body is too large",
             ),
             other => Self::new(StatusCode::BAD_REQUEST, "INVALID_JSON", other.body_text()),
         }

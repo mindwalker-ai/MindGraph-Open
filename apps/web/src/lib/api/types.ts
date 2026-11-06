@@ -402,3 +402,210 @@ export const ASK_LIMITS = {
   /** Entity ids one earlier question carries. */
   historyTurnEntities: 10,
 } as const;
+
+// --- Entity resolution (M9) --------------------------------------------------------------
+
+/** How a matching rule compares one property. */
+export type RuleKind =
+  "exact_identifier" | "normalized_email" | "normalized_phone" | "normalized_string" | "fuzzy_name";
+
+/** A matching rule as sent with a scan. */
+export interface ResolutionRule {
+  property: string;
+  kind: RuleKind;
+  /** `fuzzy_name` only (0.5 – 1.0, default 0.9). */
+  threshold?: number;
+  /** `normalized_phone` only: ISO 3166-1 alpha-2 region of national numbers. */
+  country?: string;
+  /** `normalized_email` only: count case-only local-part differences (default true). */
+  case_insensitive_local_part?: boolean;
+}
+
+/** A rule as stored with a scan (its snapshot). */
+export interface StoredRule extends ResolutionRule {
+  property_type: PropertyType;
+}
+
+/** `POST /graphs/{id}/resolution/scans`. */
+export interface ScanRequest {
+  entity_type: string;
+  max_entities?: number;
+  rules: ResolutionRule[];
+}
+
+export type WarningCode =
+  | "oversized_blocks"
+  | "invalid_values"
+  | "missing_country"
+  | "integer_phone"
+  | "values_too_long"
+  | "type_mismatch";
+
+/** A data-quality finding: counts and names, never values. */
+export interface ScanWarning {
+  code: WarningCode;
+  property: string;
+  rule: RuleKind;
+  count: number;
+}
+
+/** One bounded scan and its coverage. */
+export interface ResolutionScan {
+  scan_id: string;
+  graph_id: string;
+  entity_type: string;
+  ontology_version: number;
+  rules: StoredRule[];
+  max_entities: number;
+  entities_examined: number;
+  /** More entities of the type exist than were examined. */
+  truncated: boolean;
+  pairs_compared: number;
+  comparison_budget: number;
+  comparison_budget_reached: boolean;
+  oversized_blocks: number;
+  candidate_limit_reached: boolean;
+  candidates_found: number;
+  skipped: { already_pending: number; previously_rejected: number; already_linked: number };
+  /** Every entity examined and nothing cut short. */
+  exhaustive: boolean;
+  warnings: ScanWarning[];
+  duration_ms: number;
+  created_at: string;
+}
+
+export type SignalOutcome =
+  "exact" | "normalized" | "fuzzy" | "no_match" | "missing" | "unavailable";
+
+export type SignalNote =
+  | "initials_matched"
+  | "case_insensitive_local_part"
+  | "invalid_value"
+  | "missing_country"
+  | "integer_phone"
+  | "value_too_long"
+  | "type_mismatch";
+
+/** The evidence of one rule for one pair (no property values). */
+export interface MatchSignal {
+  property: string;
+  rule: RuleKind;
+  outcome: SignalOutcome;
+  matched: boolean;
+  similarity?: number;
+  weight: number;
+  note?: SignalNote;
+}
+
+export type CandidateStatus = "pending" | "accepted" | "rejected";
+
+/** A potential duplicate. `score` ranks review work; it is not a probability. */
+export interface ResolutionCandidate {
+  id: string;
+  scan_id: string;
+  graph_id: string;
+  entity_type: string;
+  entity_a_id: string;
+  entity_b_id: string;
+  score: number;
+  signals: MatchSignal[];
+  matched_rules: string[];
+  status: CandidateStatus;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+}
+
+export interface CandidateCounts {
+  pending: number;
+  accepted: number;
+  rejected: number;
+}
+
+/** `GET /graphs/{id}/resolution/candidates`. */
+export interface CandidatePage {
+  data: ResolutionCandidate[];
+  next_cursor: string | null;
+  limit: number;
+  counts: CandidateCounts;
+}
+
+export interface CandidateQuery {
+  status?: CandidateStatus | "all";
+  scan_id?: string;
+  entity_id?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export type DecisionKind = "same_entity" | "different_entities";
+
+/** A review decision and its provenance. */
+export interface ResolutionDecision {
+  id: string;
+  candidate_id: string;
+  scan_id: string;
+  decision: DecisionKind;
+  entity_a_id: string;
+  entity_b_id: string;
+  canonical_entity_id: string | null;
+  previous_canonical_entity_ids: string[];
+  linked_entity_ids: string[];
+  score: number;
+  matched_rules: string[];
+  actor: string;
+  reconsidered: boolean;
+  created_at: string;
+}
+
+/** The logical identity of one entity; the graph is never merged. */
+export interface EntityIdentity {
+  entity_id: string;
+  canonical_entity_id: string;
+  member_entity_ids: string[];
+  is_canonical: boolean;
+  resolved: boolean;
+  resolution_type: "manual" | null;
+  entity_type: string | null;
+  members: { entity_id: string; decision_id: string; linked_at: string }[];
+  physical_graph_merged: false;
+}
+
+/** `GET /graphs/{id}/resolution/candidates/{candidate_id}`. */
+export interface CandidateDetail {
+  candidate: ResolutionCandidate;
+  /** The original entities as stored in the graph (`null` if gone). */
+  entity_a: Entity | null;
+  entity_b: Entity | null;
+  identity_a: EntityIdentity;
+  identity_b: EntityIdentity;
+  decisions: ResolutionDecision[];
+}
+
+/** `POST .../candidates/{candidate_id}/decisions`. */
+export interface DecisionRequest {
+  decision: DecisionKind;
+  canonical_entity_id?: string;
+  reconsider?: boolean;
+}
+
+export interface DecisionResponse {
+  decision: ResolutionDecision;
+  candidate: ResolutionCandidate;
+  identity: EntityIdentity;
+  /** An identical earlier decision was returned. */
+  replayed: boolean;
+}
+
+/** Bounds of the entity resolution endpoints. */
+export const RESOLUTION_LIMITS = {
+  maxEntitiesDefault: 400,
+  maxEntitiesMin: 2,
+  maxEntitiesMax: 999,
+  maxRules: 10,
+  thresholdDefault: 0.9,
+  thresholdMin: 0.5,
+  thresholdMax: 1,
+  pageDefault: 20,
+  pageMax: 100,
+} as const;

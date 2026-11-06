@@ -48,7 +48,7 @@ fn parse_uuid(kind: &'static str, value: &str) -> Result<Uuid, DomainError> {
     validate_uuid(kind, uuid)
 }
 
-/// Defines one identifier newtype. A macro is used only because the six
+/// Defines one identifier newtype. A macro is used only because the
 /// identifier types are otherwise identical; each still gets its own docs.
 macro_rules! define_id {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
@@ -167,6 +167,26 @@ define_id!(
     /// Identifies an ingestion or analysis job.
     IngestionJobId,
     "ingestion job id"
+);
+
+define_id!(
+    /// Identifies one entity resolution scan (M9): a bounded duplicate
+    /// candidate search over one entity type of one graph.
+    ResolutionScanId,
+    "resolution scan id"
+);
+
+define_id!(
+    /// Identifies one duplicate candidate (a pair of entities) found by a
+    /// resolution scan.
+    ResolutionCandidateId,
+    "resolution candidate id"
+);
+
+define_id!(
+    /// Identifies one human review decision about a duplicate candidate.
+    ResolutionDecisionId,
+    "resolution decision id"
 );
 
 #[cfg(test)]

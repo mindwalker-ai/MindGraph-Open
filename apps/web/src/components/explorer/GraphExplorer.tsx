@@ -1271,6 +1271,8 @@ export function GraphExplorer({
               onClose={() => dispatch({ type: "clearSelection" })}
               onOpenEntity={openEntity}
               onSelectRelationship={(id) => dispatch({ type: "selectRelationship", id })}
+              graphId={graphId}
+              api={api}
             />
           ) : selectedEdge ? (
             <RelationshipDetails
