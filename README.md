@@ -12,11 +12,11 @@ connect your AI agents through MCP.
 Data → Graph → Explore → Ask → Investigate → Connect to AI Agents
 ```
 
-> **Status: pre-alpha.** Milestones **M0** to **M8** are complete: graph
+> **Status: pre-alpha.** Milestones **M0** to **M9** are complete: graph
 > storage, project APIs, dataset ingestion, the AI Graph Builder, the visual
-> Graph Explorer, graph-first GraphRAG (Ask MindGraph) and a read-only MCP
-> server for AI agents. Entity resolution arrives next. See the
-> [roadmap](#roadmap).
+> Graph Explorer, graph-first GraphRAG (Ask MindGraph), a read-only MCP
+> server for AI agents and entity resolution with human review. Launch
+> hardening arrives next. See the [roadmap](#roadmap).
 
 ---
 
@@ -162,6 +162,29 @@ graph evidence to Core's model provider. See [`docs/mcp/`](docs/mcp/README.md)
 for the tools, security and the [Claude Code](docs/mcp/claude-code.md),
 [Codex](docs/mcp/codex.md) and [Cursor](docs/mcp/cursor.md) guides.
 
+### Review potential duplicates (M9)
+
+**Resolution** in the sidebar finds records of one entity type that may
+describe the same real-world entity:
+
+1. Pick the matching rules: exact identifier, normalized email, phone or
+   text, and fuzzy name.
+2. Run a bounded scan. It reports what it covered.
+3. Compare each candidate's two original records side by side, with the
+   evidence for every property.
+
+Approving a candidate (**Same Entity**, then pick the canonical record)
+creates a **logical identity mapping** with provenance. Nothing in the graph
+is merged, deleted or rewired, so the Graph Explorer, Ask MindGraph and MCP
+keep showing the original records. An entity's details in the explorer show
+its resolved identity and pending duplicates. The score ranks review work
+and is not a probability. No AI is involved.
+
+Load `examples/fraud/customers_kyc.csv` (step 7 below) for a second customer
+source with deliberate near-duplicates. See
+[`docs/entity-resolution/`](docs/entity-resolution/README.md) for the
+methods, scoring, limits and API.
+
 ### Load a dataset without AI (M4)
 
 The files in [`examples/fraud/`](examples/fraud/) build
@@ -213,6 +236,17 @@ JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
   -d @examples/fraud/devices.mapping.json | jq -r .id)
 sleep 1 && curl -s $API/jobs/$JOB | jq '{status, result}'
 # → {"records_processed": 4, "entities_created": 3, "entities_matched": 3, "relationships_created": 4}
+
+# 7. Optional (M9): a second customer source, KYC, with near-duplicates of the
+#    first. Its own ids (K-1001, …) create new Customer entities.
+SOURCE=$(curl -s -F file=@examples/fraud/customers_kyc.csv $API/graphs/$GRAPH/data-sources | jq -r .id)
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/analyze | jq -r .job_id)
+sleep 1 && curl -s $API/jobs/$JOB | jq .status
+JOB=$(curl -s -X POST $API/graphs/$GRAPH/data-sources/$SOURCE/ingestions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" \
+  -d @examples/fraud/customers_kyc.mapping.json | jq -r .id)
+sleep 1 && curl -s $API/jobs/$JOB | jq '{status, result}'
+# → {"records_processed": 8, "entities_created": 8, "entities_matched": 0, "relationships_created": 0}
 ```
 
 Then open `http://localhost:3000/graphs/$GRAPH/explore`: select Alice Tan,
@@ -230,13 +264,13 @@ curl -s "$API/graphs/$GRAPH/entities/$ALICE/neighbors?direction=outgoing&limit=1
 curl -s -X POST $API/graphs/$GRAPH/paths -H "Content-Type: application/json" \
   -d "{\"source_id\": \"$ALICE\", \"target_id\": \"$BUDI\", \"max_depth\": 3}" \
   | jq '{found, hops, via: [.relationships[].relationship_type]}' # → 2 hops via USES, USES
-# 7. Ask MindGraph (needs a configured model): evidence first, then a cited answer.
+# 8. Ask MindGraph (needs a configured model): evidence first, then a cited answer.
 curl -s -X POST $API/graphs/$GRAPH/ask -H "Content-Type: application/json" \
   -d "{\"question\": \"Who else shares this device?\",
        \"scope\": {\"mode\": \"selected_entities\", \"entity_ids\": [\"$ALICE\"]}}" \
   | jq '{status, answer, evidence: [.evidence.entities[] | .properties.customer_id // .properties.device_id]}'
 # → "status": "answered", evidence ["DEVICE-921", "C001", "C002"]
-# 8. A follow-up: the earlier question and the entities it cited (kept by the client).
+# 9. A follow-up: the earlier question and the entities it cited (kept by the client).
 curl -s -X POST $API/graphs/$GRAPH/ask -H "Content-Type: application/json" \
   -d "{\"question\": \"Is there a path between them?\",
        \"history\": [{\"question\": \"Who else shares this device?\",
@@ -301,7 +335,7 @@ crates/
   mindgraph-metadata/       PostgreSQL metadata store, SQLx, migrations (M3)
   mindgraph-ingestion/      CSV / JSON ingestion (M4)
   mindgraph-ontology/       Ontology workflows (M3, M5)
-  mindgraph-entity-resolution/  Duplicate detection (M9)
+  mindgraph-entity-resolution/  Deterministic duplicate detection, pure (M9)
   mindgraph-graphrag/       Graph-first retrieval (M7)
   mindgraph-mcp/            MCP server over Core's REST API (M8, Apache-2.0)
   mindgraph-cli/            `mindgraph` CLI
@@ -645,8 +679,8 @@ the Docker image and in CI.
 | M6        | Visual Graph Explorer (Sigma.js, Graphology)             | ✅ Done |
 | M7        | GraphRAG with evidence graphs (Ask MindGraph)            | ✅ Done |
 | M8        | MCP server for Claude, Codex and Cursor                  | ✅ Done |
-| M9        | Basic entity resolution                                  | Next    |
-| M10       | Launch hardening and demos                               | Planned |
+| M9        | Basic entity resolution                                  | ✅ Done |
+| M10       | Launch hardening and demos                               | Next    |
 
 ## Contributing
 

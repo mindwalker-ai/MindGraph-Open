@@ -21,6 +21,9 @@ FORBIDDEN_CORE_DEPS := axum|axum-core|hyper|reqwest|sqlx|sqlx-core|sqlx-postgres
 # mindgraph-mcp (Apache-2.0, ADR-015) reaches MindGraph only over Core's REST
 # API (ADR-011, M8): it must not link another MindGraph crate or a database.
 FORBIDDEN_MCP_DEPS := mindgraph-[a-z-]+|sqlx|sqlx-core|sqlx-postgres|tokio-postgres
+# mindgraph-entity-resolution (M9, ADR-009) holds pure, deterministic matching:
+# no async runtime, HTTP, database or graph backend.
+FORBIDDEN_RESOLUTION_DEPS := axum|axum-core|hyper|http|reqwest|sqlx|sqlx-core|sqlx-postgres|tokio|tokio-postgres|tower|mindgraph-graph|mindgraph-core|mindgraph-metadata
 
 .PHONY: help
 help: ## Show available targets
@@ -63,7 +66,7 @@ dev-ai: ## Run the AI service on 127.0.0.1:8000
 
 # --- Quality gates (mirror CI) -----------------------------------------------
 
-.PHONY: check fmt rust-check web-check ai-check check-domain-boundary check-core-boundary check-mcp-boundary
+.PHONY: check fmt rust-check web-check ai-check check-domain-boundary check-core-boundary check-mcp-boundary check-resolution-boundary
 check: rust-check web-check ai-check ## Run every CI check locally
 
 fmt: ## Format Rust, TypeScript and Python code
@@ -71,7 +74,7 @@ fmt: ## Format Rust, TypeScript and Python code
 	cd $(WEB_DIR) && npm run format
 	cd $(AI_DIR) && uv run ruff format .
 
-rust-check: check-domain-boundary check-core-boundary check-mcp-boundary ## cargo fmt --check, clippy and tests
+rust-check: check-domain-boundary check-core-boundary check-mcp-boundary check-resolution-boundary ## cargo fmt --check, clippy and tests
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked
@@ -106,6 +109,14 @@ check-mcp-boundary: ## Fail if mindgraph-mcp links a MindGraph server crate or a
 	fi; \
 	echo "mindgraph-mcp dependency boundary OK"
 
+check-resolution-boundary: ## Fail if mindgraph-entity-resolution depends on a runtime, HTTP, database or graph crate
+	@deps=$$(cargo tree -p mindgraph-entity-resolution -e normal --locked --prefix none --format '{p}' | awk '{print $$1}' | sort -u); \
+	bad=$$(echo "$$deps" | grep -xE '$(FORBIDDEN_RESOLUTION_DEPS)' || true); \
+	if [ -n "$$bad" ]; then \
+		echo "mindgraph-entity-resolution must not depend on: $$bad (ADR-009)"; exit 1; \
+	fi; \
+	echo "mindgraph-entity-resolution dependency boundary OK"
+
 # --- MCP server (M8) ---------------------------------------------------------
 
 .PHONY: mcp-build test-mcp-live
@@ -130,11 +141,13 @@ hugegraph-test-up: ## Start a throwaway HugeGraph 1.7 on 127.0.0.1:18080 for liv
 hugegraph-test-down: ## Stop the throwaway HugeGraph (its data is discarded)
 	$(CONTAINER) rm -f mindgraph-hugegraph-test
 
-test-hugegraph: ## Run the GraphStore contract, the M4 ingestion flow and the M8 MCP flow against a live HugeGraph (see hugegraph-test-up)
+test-hugegraph: ## Run the GraphStore contract, the M4 ingestion, M8 MCP and M9 entity resolution flows against a live HugeGraph (see hugegraph-test-up)
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-api --test hugegraph_ingestion --locked -- --ignored
+	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
+		cargo test -p mindgraph-api --test hugegraph_resolution --locked -- --ignored
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-mcp --test end_to_end --locked -- --ignored --exact \
 		an_agent_finds_the_shared_device_over_mcp_on_hugegraph

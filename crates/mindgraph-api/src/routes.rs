@@ -9,8 +9,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use mindgraph_core::{
-    CreateGraphProject, GraphBuilderService, GraphExplorerService, GraphProjectService,
-    GraphRagService, IngestionService, OntologyService,
+    CreateGraphProject, EntityResolutionService, GraphBuilderService, GraphExplorerService,
+    GraphProjectService, GraphRagService, IngestionService, OntologyService,
 };
 use mindgraph_domain::GraphId;
 use serde::Serialize;
@@ -24,6 +24,7 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::explorer;
 use crate::request_context::request_context;
+use crate::resolution;
 
 /// Room for multipart framing on top of the file itself.
 const MULTIPART_OVERHEAD_BYTES: u64 = 64 * 1024;
@@ -44,6 +45,9 @@ pub struct AppState {
     /// GraphRAG; `None` in routers built without it (questions are then
     /// `503 AI_NOT_CONFIGURED`).
     pub(crate) graphrag: Option<Arc<GraphRagService>>,
+    /// Entity resolution (M9); `None` in routers built without it (requests
+    /// are then `503`).
+    pub(crate) entity_resolution: Option<Arc<EntityResolutionService>>,
 }
 
 impl AppState {
@@ -61,7 +65,15 @@ impl AppState {
             graph_builder: None,
             graph_explorer: None,
             graphrag: None,
+            entity_resolution: None,
         }
+    }
+
+    /// Attaches entity resolution (M9).
+    #[must_use]
+    pub fn with_entity_resolution(mut self, entity_resolution: EntityResolutionService) -> Self {
+        self.entity_resolution = Some(Arc::new(entity_resolution));
+        self
     }
 
     /// Attaches GraphRAG (Ask MindGraph).
@@ -142,6 +154,32 @@ pub fn router(state: AppState) -> Router {
         .route("/graphs/{graph_id}/subgraph", post(explorer::get_subgraph))
         .route("/graphs/{graph_id}/ask", post(ask::ask))
         .route("/graphrag/status", get(ask::status))
+        .route(
+            "/graphs/{graph_id}/resolution/scans",
+            get(resolution::list_scans)
+                .post(resolution::create_scan)
+                .layer(DefaultBodyLimit::max(resolution::MAX_SCAN_BODY_BYTES)),
+        )
+        .route(
+            "/graphs/{graph_id}/resolution/scans/{scan_id}",
+            get(resolution::get_scan),
+        )
+        .route(
+            "/graphs/{graph_id}/resolution/candidates",
+            get(resolution::list_candidates),
+        )
+        .route(
+            "/graphs/{graph_id}/resolution/candidates/{candidate_id}",
+            get(resolution::get_candidate),
+        )
+        .route(
+            "/graphs/{graph_id}/resolution/candidates/{candidate_id}/decisions",
+            post(resolution::decide),
+        )
+        .route(
+            "/graphs/{graph_id}/resolution/entities/{entity_id}",
+            get(resolution::get_identity),
+        )
         .route("/jobs/{job_id}", get(datasets::get_job))
         .route("/jobs/{job_id}/events", get(datasets::job_events));
     Router::new()

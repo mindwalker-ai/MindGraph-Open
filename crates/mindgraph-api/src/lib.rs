@@ -24,6 +24,12 @@
 //! POST /api/v1/graphs/{graph_id}/subgraph   entities and the relationships among them (M6)
 //! POST /api/v1/graphs/{graph_id}/ask        GraphRAG question with evidence (M7)
 //! GET  /api/v1/graphrag/status              can questions be answered? (M7)
+//! POST|GET /api/v1/graphs/{graph_id}/resolution/scans          bounded duplicate scan, history (M9)
+//! GET  /api/v1/graphs/{graph_id}/resolution/scans/{id}     one scan and its coverage (M9)
+//! GET  /api/v1/graphs/{graph_id}/resolution/candidates     review queue, paginated (M9)
+//! GET  /api/v1/graphs/{graph_id}/resolution/candidates/{id}         both entities + evidence (M9)
+//! POST /api/v1/graphs/{graph_id}/resolution/candidates/{id}/decisions   same / different (M9)
+//! GET  /api/v1/graphs/{graph_id}/resolution/entities/{id}  logical identity group (M9)
 //! GET  /api/v1/jobs/{job_id}                read a job
 //! GET  /api/v1/jobs/{job_id}/events         job progress as Server-Sent Events
 //! ```
@@ -38,6 +44,7 @@ mod dto;
 mod error;
 mod explorer;
 mod request_context;
+mod resolution;
 mod routes;
 
 pub use config::{AiSettings, Config, ConfigError, DatabaseConfig, HugeGraphSettings};

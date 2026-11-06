@@ -1,0 +1,20 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "customer",
+        "entity_type": "Customer",
+        "mode": "create_or_match",
+        "identity": [{ "source_field": "kyc_ref", "property": "customer_id" }],
+        "properties": [
+          { "source_field": "kyc_ref", "property": "customer_id" },
+          { "source_field": "full_name", "property": "name" },
+          { "source_field": "email", "property": "email" },
+          { "source_field": "phone", "property": "phone" },
+          { "source_field": "city", "property": "city" }
+        ]
+      }
+    ],
+    "relationships": []
+  }
+}

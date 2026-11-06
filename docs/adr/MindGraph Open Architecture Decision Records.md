@@ -941,6 +941,101 @@ merge strategy
 
 This prepares the model for future enterprise explainability.
 
+## Refinement (M9)
+
+M9 implements entity resolution as **candidate detection, human review and
+non-destructive logical identity**. It never rewrites the graph.
+
+```text
+GraphStore (bounded search) ─► mindgraph-entity-resolution ─► EntityResolutionService ─► EntityResolutionStore
+   entities of one type          normalize · block · compare     (mindgraph-core)           (PostgreSQL / memory)
+                                  · score (pure, no I/O)                                     scans · candidates ·
+                                                                                             decisions · identity groups
+```
+
+- **Logical merge, never physical.** The GraphStore has no atomic
+  "update entity + rewire relationships + delete duplicate" operation, and
+  HugeGraph writes are not coordinated with PostgreSQL. An approved "same
+  entity" decision therefore records metadata only:
+  - a decision with its provenance;
+  - a flat identity group in which every member maps directly to the
+    canonical entity the reviewer chose, and the canonical entity maps to
+    itself.
+
+  No entity is deleted, no relationship is rewired and no property is
+  overwritten. No `SAME_AS` relationship is created. The original records
+  stay readable through the Graph Explorer, GraphRAG and MCP, which keep
+  their M6–M8 semantics; no API substitutes canonical ids. Identity
+  responses say `"physical_graph_merged": false`.
+- **No automatic merge.** Every candidate, even an exact identifier match,
+  waits for a person. Fuzzy name matches are weak evidence. This is a
+  stricter subset of the original "automatic merge only for deterministic
+  identifiers" rule.
+- **Score, not confidence.** The example above ("91%") is replaced by a
+  deterministic ranking score in `[0, 1)`: `1 − Π (1 − weight)` over
+  agreeing signals, with fixed, documented weights. It orders review work
+  and is never shown as a percentage or a probability.
+- **Methods.** The five rules each name one explicit ontology property of
+  the scanned type:
+  - `exact_identifier`
+  - `normalized_email`: domain lower-cased; the local part is preserved,
+    and a case-only difference is a separate, weaker signal.
+  - `normalized_phone`: libphonenumber E.164; national numbers need a
+    default country.
+  - `normalized_string`: NFKC, case folding, whitespace.
+  - `fuzzy_name`: token-aware Jaro-Winkler with a 0.90 default threshold.
+
+  Missing and invalid values never match. Entities are compared only within
+  one entity type and one graph.
+- **Bounded, synchronous scans.** A scan has these limits:
+  - it reads at most 999 entities of one type through the existing
+    GraphStore search (the first in id order, plus one to detect
+    truncation);
+  - it compares at most 20,000 blocked pairs and skips blocks of more than
+    50 entities;
+  - it keeps at most 2,000 candidates and has a 30 s deadline.
+
+  Every limit it hits is reported, and `exhaustive` is true only when none
+  was. This is not the "bulk entity resolution" job that ADR-006 lists. A
+  graph-wide resolution job needs a dedicated resolution-run model and an
+  indexed enumeration API, designed later, never a fabricated data-source
+  job.
+- **Persistence.** There is a separate `EntityResolutionStore` port
+  (memory and PostgreSQL), not new `MetadataStore` methods. The append-only
+  migration adds `entity_resolution_scans`, `entity_resolution_candidates`,
+  `entity_resolution_decisions` and `entity_identity_aliases`:
+  - Scans and decisions are immutable.
+  - One pending candidate per pair and graph.
+  - A deferred constraint trigger keeps groups flat and single-typed.
+  - Writes per graph are serialised with a transaction-scoped advisory
+    lock, so concurrent approvals cannot create conflicting canonical
+    mappings.
+  - No property value is stored: evidence names properties, rules and
+    outcomes only.
+- **Review rules.**
+  - Repeating a decision is idempotent.
+  - Changing it is a `409 DECISION_CONFLICT`.
+  - Rescans skip pairs that are pending, rejected or already linked.
+  - A rejected pair is reviewed again only with an explicit `reconsider`.
+  - Linking entities that an earlier review marked different, or rejecting
+    already-linked entities, is a `409 IDENTITY_CONFLICT`.
+  - Accepted mappings cannot be undone in v0.1.
+- **Provenance.** Each decision keeps:
+  - the candidate's original entity ids and the canonical entity;
+  - the canonical entities of the groups it consolidated, and the members
+    whose mapping it wrote;
+  - the decision, score, agreeing rules, scan id, timestamp and actor
+    (`local-user`).
+
+  M4 entities carry no source-record references, so source records are not
+  part of M9 provenance and are never fabricated.
+- **Ingestion is unchanged (ADR-008).** M4 exact identity matching
+  (`create_or_match`, `match_only`) still decides which records become one
+  entity at write time. M9 works on already-ingested entities and never
+  feeds back into ingestion. The "optional entity resolution" step of the
+  ADR-008 pipeline remains future work, after a separate design review, so
+  there are never two conflicting identity authorities.
+
 ---
 
 # ADR-010: GraphRAG Architecture

@@ -280,6 +280,12 @@ function fakeApi(status: GraphBuilderStatus["status"] = "ready"): FakeApi {
     getSubgraph: vi.fn(),
     ask: vi.fn(),
     graphRagStatus: vi.fn(),
+    runResolutionScan: vi.fn(),
+    listResolutionScans: vi.fn(),
+    listResolutionCandidates: vi.fn(),
+    getResolutionCandidate: vi.fn(),
+    decideResolutionCandidate: vi.fn(),
+    getEntityIdentity: vi.fn(),
   };
 }
 

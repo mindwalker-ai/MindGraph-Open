@@ -16,6 +16,8 @@
 
 #[macro_use]
 mod contract;
+#[macro_use]
+mod resolution_contract;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -27,7 +29,7 @@ use mindgraph_domain::{
     OntologyVersion,
 };
 use mindgraph_ingestion::{EntityMapping, EntityMode, FieldMapping, IngestionMapping};
-use mindgraph_metadata::PostgresMetadataStore;
+use mindgraph_metadata::{PostgresEntityResolutionStore, PostgresMetadataStore};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{AssertSqlSafe, Row};
 
@@ -69,6 +71,19 @@ async fn postgres_store() -> Arc<dyn MetadataStore> {
 }
 
 metadata_store_contract!([ignore = "requires PostgreSQL 17; see module docs"] postgres_store);
+
+/// The M9 entity resolution store over the same fresh database.
+async fn postgres_resolution_stores() -> resolution_contract::Stores {
+    let pool = fresh_database().await;
+    resolution_contract::Stores {
+        metadata: Arc::new(PostgresMetadataStore::from_pool(pool.clone())),
+        resolution: Arc::new(PostgresEntityResolutionStore::from_pool(pool)),
+    }
+}
+
+resolution_store_contract!(
+    [ignore = "requires PostgreSQL 17; see module docs"] postgres_resolution_stores
+);
 
 fn draft(workspace: mindgraph_domain::WorkspaceId, name: &str) -> GraphProject {
     let now = Utc::now().trunc_subsecs(6);
@@ -119,6 +134,10 @@ async fn migrations_create_every_table_and_are_idempotent() {
         tables,
         [
             "data_sources",
+            "entity_identity_aliases",
+            "entity_resolution_candidates",
+            "entity_resolution_decisions",
+            "entity_resolution_scans",
             "graph_projects",
             "ingestion_job_data_sources",
             "ingestion_jobs",
@@ -127,6 +146,162 @@ async fn migrations_create_every_table_and_are_idempotent() {
             "workspaces"
         ]
     );
+}
+
+/// The database itself keeps resolution history immutable and identity
+/// groups flat, even against writes that bypass the store.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 17; see module docs"]
+async fn resolution_history_is_immutable_and_groups_stay_flat_in_the_database() {
+    use mindgraph_core::matching::{RuleSet, RuleSpec};
+    use mindgraph_core::{
+        CandidateQuery, DecisionCommand, DecisionKind, EntityResolutionStore, LOCAL_ACTOR,
+        NewCandidate, ResolutionScan, SkippedPairs,
+    };
+    use mindgraph_domain::{
+        EntityId, EntityType, EntityTypeId, PropertiesSchema, PropertyDefinition, PropertyKey,
+        PropertyType, ResolutionCandidateId, ResolutionDecisionId, ResolutionScanId, TypeName,
+    };
+
+    let pool = fresh_database().await;
+    let metadata = PostgresMetadataStore::from_pool(pool.clone());
+    let store = PostgresEntityResolutionStore::from_pool(pool.clone());
+    let workspace = metadata.ensure_local_workspace().await.unwrap();
+    let graph = draft(workspace.id(), "Flat groups");
+    let customer = EntityType::new(
+        EntityTypeId::new(),
+        graph.id(),
+        TypeName::new("Customer").unwrap(),
+        PropertiesSchema::new(vec![PropertyDefinition::optional(
+            PropertyKey::new("name").unwrap(),
+            PropertyType::String,
+        )])
+        .unwrap(),
+    );
+    let ontology = Ontology::new(
+        graph.id(),
+        OntologyVersion::INITIAL,
+        vec![customer.clone()],
+        vec![],
+    )
+    .unwrap();
+    metadata.create_graph(&graph, &ontology).await.unwrap();
+    let rules = RuleSet::validate(
+        &customer,
+        &[RuleSpec {
+            property: "name".into(),
+            kind: "fuzzy_name".into(),
+            ..RuleSpec::default()
+        }],
+    )
+    .unwrap();
+    let now = Utc::now().trunc_subsecs(6);
+    let (a, b, c) = (EntityId::new(), EntityId::new(), EntityId::new());
+    let candidate = ResolutionCandidateId::new();
+    store
+        .create_scan_with_candidates(
+            ResolutionScan {
+                id: ResolutionScanId::new(),
+                graph_id: graph.id(),
+                entity_type: TypeName::new("Customer").unwrap(),
+                rules,
+                ontology_version: OntologyVersion::INITIAL,
+                max_entities: 400,
+                entities_examined: 2,
+                truncated: false,
+                pairs_compared: 1,
+                comparison_budget: 20_000,
+                comparison_budget_reached: false,
+                oversized_blocks: 0,
+                candidate_limit_reached: false,
+                candidates_found: 0,
+                skipped: SkippedPairs::default(),
+                warnings: vec![],
+                duration_ms: 1,
+                created_at: now,
+            },
+            vec![NewCandidate {
+                id: candidate,
+                entity_a: a,
+                entity_b: b,
+                score: 0.6,
+                signals: vec![],
+            }],
+        )
+        .await
+        .unwrap();
+    let decision = ResolutionDecisionId::new();
+    store
+        .record_decision(DecisionCommand {
+            id: decision,
+            graph_id: graph.id(),
+            candidate_id: candidate,
+            kind: DecisionKind::SameEntity,
+            canonical: Some(a),
+            reconsider: false,
+            actor: LOCAL_ACTOR.into(),
+            decided_at: now,
+            max_group_members: 100,
+        })
+        .await
+        .unwrap();
+
+    // Decisions and scans are append-only.
+    for statement in [
+        "UPDATE entity_resolution_decisions SET actor = 'someone else'",
+        "DELETE FROM entity_resolution_decisions",
+        "UPDATE entity_resolution_scans SET truncated = true",
+    ] {
+        let err = sqlx::query(statement).execute(&pool).await.unwrap_err();
+        assert!(err.to_string().contains("immutable"), "{statement}: {err}");
+    }
+
+    // A chain (c → b → a) is refused at commit: b is not canonical.
+    let chain = sqlx::query(
+        "INSERT INTO entity_identity_aliases \
+         (graph_id, entity_id, canonical_entity_id, entity_type, decision_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, 'Customer', $4, now(), now())",
+    )
+    .bind(graph.id().as_uuid())
+    .bind(c.as_uuid())
+    .bind(b.as_uuid())
+    .bind(decision.as_uuid())
+    .execute(&pool)
+    .await;
+    assert!(chain.is_err(), "a chained alias must be rejected");
+    // Re-pointing the canonical entity while members still map to it is refused.
+    let repoint = sqlx::query(
+        "UPDATE entity_identity_aliases SET canonical_entity_id = $2 \
+         WHERE graph_id = $1 AND entity_id = $3",
+    )
+    .bind(graph.id().as_uuid())
+    .bind(b.as_uuid())
+    .bind(a.as_uuid())
+    .execute(&pool)
+    .await;
+    assert!(repoint.is_err(), "a group cannot lose its canonical entity");
+    // The original mapping is intact.
+    assert_eq!(
+        store
+            .resolve_canonical_identity(graph.id(), b)
+            .await
+            .unwrap(),
+        a
+    );
+    let page = store
+        .list_candidates(
+            graph.id(),
+            &CandidateQuery {
+                status: None,
+                scan_id: None,
+                entity_id: None,
+                limit: 10,
+                after: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.counts.accepted, 1);
 }
 
 #[tokio::test]

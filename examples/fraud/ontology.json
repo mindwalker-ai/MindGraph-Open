@@ -7,7 +7,9 @@
         { "name": "customer_id", "type": "string", "required": true },
         { "name": "name", "type": "string", "required": true },
         { "name": "age", "type": "integer", "required": false },
-        { "name": "city", "type": "string", "required": false }
+        { "name": "city", "type": "string", "required": false },
+        { "name": "email", "type": "string", "required": false },
+        { "name": "phone", "type": "string", "required": false }
       ]
     },
     {

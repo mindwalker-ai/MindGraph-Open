@@ -41,6 +41,12 @@ application layer over Core's public REST API and links no MindGraph crate
 (ADR-011 refinement, ADR-015). `make check-mcp-boundary` enforces this. The
 `mindgraph` CLI launches it for `mindgraph mcp`.
 
+`mindgraph-entity-resolution` (M9) holds pure, deterministic matching. It
+may depend on `mindgraph-domain` and small Rust libraries only
+(`phonenumber`, `strsim`, `unicode-normalization`, `caseless`, `serde`).
+`make check-resolution-boundary` fails if a runtime, HTTP, database or graph
+crate shows up in its dependency tree.
+
 `mindgraph-domain` may depend only on small, infrastructure-free libraries
 (`serde`, `serde_json`, `uuid`, `chrono`, `thiserror`). CI enforces this with
 `make check-domain-boundary`, which fails if `axum`, `sqlx`, `reqwest`,
@@ -407,8 +413,9 @@ Before lookups were batched, 1,000 such rows took 119 s against HugeGraph
 - In-process workers; jobs do not resume after a restart (they fail with
   `PROCESS_RESTARTED`); one `mindgraph-core` process per database.
 - No public cancellation endpoint (`cancelled` exists in the schema only).
-- Exact identity matching only: no fuzzy entity resolution (M9), no
-  automatic ontology or mapping suggestions (M5), no GraphRAG (M7).
+- Exact identity matching only at ingestion time. Fuzzy duplicate detection
+  works on ingested entities (M9, logical identity only), and ingestion
+  never reads its mappings.
 - No transaction across PostgreSQL and HugeGraph, nor across write batches.
 - Identity lookups on HugeGraph still scan the whole type once per batch
   (properties are not indexed in M2's generic schema), so re-ingesting into
@@ -925,3 +932,83 @@ provider.
   - Only Claude Code was tested as a real client. Codex and Cursor
     configurations follow their documentation.
 
+
+## Entity resolution (ADR-009, M9)
+
+Potential duplicates are found, reviewed by a person and recorded as
+**logical identity**. The graph is never rewritten. Details, wording and
+measured numbers: [docs/entity-resolution](../entity-resolution/README.md).
+
+```text
+HTTP ── mindgraph-api (resolution.rs) ── EntityResolutionService (mindgraph-core)
+                                           │ GraphExplorerService: graph check, ontology,
+                                           │   bounded GraphStore search (read-only)
+                                           │ mindgraph-entity-resolution: normalize · block ·
+                                           │   compare · score (pure, spawn_blocking)
+                                           ▼
+                                Arc<dyn EntityResolutionStore>   (port, in mindgraph-core)
+                       PostgresEntityResolutionStore (mindgraph-metadata, same pool) ── PostgreSQL
+                       MemoryEntityResolutionStore   (mindgraph-core, tests/dev)
+```
+
+### Crates
+
+| Crate | Owns |
+|---|---|
+| `mindgraph-entity-resolution` | `normalize.rs` (text, names, email, phone via libphonenumber), `similarity.rs` (token-aware Jaro-Winkler), `rules.rs` (rule kinds, validation against the ontology), `blocking.rs`, `matching.rs` (the bounded scan), `scoring.rs` (fixed weights, `1 − Π(1 − w)`), `identity.rs` (flat groups, merge planning) |
+| `mindgraph-core` | `resolution_store.rs` (the port, records and the decision rules every store applies), `resolution_memory.rs`, `resolution.rs` (`EntityResolutionService`: validation, 30 s deadline, 2 concurrent scans, read-only entity checks before a decision) |
+| `mindgraph-metadata` | `resolution.rs` (`PostgresEntityResolutionStore`), migration `20261106120000_m9_entity_resolution.sql` |
+| `mindgraph-api` | `resolution.rs` (six routes, DTOs, error codes) |
+| `apps/web` | `/graphs/{graphId}/resolution` (rules, scan coverage, review queue, side-by-side compare, canonical chooser, decision history); `IdentityCard` in the Graph Explorer's entity details |
+
+### Persistence
+
+- **Tables.** One append-only migration:
+  - `entity_resolution_scans`: the rule snapshot, ontology version and
+    coverage counters.
+  - `entity_resolution_candidates`: the ordered pair, score, value-free
+    evidence and status.
+  - `entity_resolution_decisions`: immutable provenance.
+  - `entity_identity_aliases`: one row per group member, the canonical
+    entity included.
+- **Invariants in the database.**
+  - A trigger rejects updates and deletes of scans and decisions.
+  - A partial unique index allows one pending candidate per pair and graph.
+  - `CHECK` constraints enforce ordered pairs and status/decision
+    consistency.
+  - A deferred constraint trigger keeps every group flat and single-typed:
+    a member maps to a canonical entity that maps to itself.
+- **Concurrency.** Every scan store and decision takes
+  `pg_advisory_xact_lock` on its graph. Concurrent approvals are therefore
+  serialised per graph and cannot produce conflicting canonical mappings.
+  Different graphs never wait for each other. The memory store holds one
+  mutex.
+- **No personal data in PostgreSQL.** Evidence names properties, rule kinds
+  and outcomes; property values stay in the GraphStore.
+
+### Tests
+
+| Where | What |
+|---|---|
+| `crates/mindgraph-entity-resolution` | unit tests per module; `tests/matching.rs` (exact, normalized, fuzzy, common names, missing and integer phones, type isolation, determinism, dedup, budget, rule priority); `tests/scan_perf.rs` (400 and 999 synthetic entities) |
+| `crates/mindgraph-core/tests/resolution_service.rs` | scans, truncation, validation, timeout, decisions, reconsideration, isolation, cross-type and missing-entity refusals, and a write spy plus snapshots proving approval leaves the GraphStore unchanged |
+| `crates/mindgraph-metadata/tests/resolution_contract` | the shared store contract (18 cases, including concurrent approvals and rollback) against memory on every `cargo test` and PostgreSQL with `make test-postgres` |
+| `crates/mindgraph-api/tests/resolution_api.rs` | every endpoint and error code, the envelope and `x-request-id` |
+| `crates/mindgraph-api/tests/hugegraph_resolution.rs` | the review flow against HugeGraph 1.7 (`make test-hugegraph`): originals, properties and relationships unchanged, other graph untouched |
+
+### Known M9 limitations
+
+- **Scans are bounded.** At most 999 entities of one type are examined
+  (the first in id order), with 20,000 comparisons and a 30 s deadline.
+  There is no graph-wide or asynchronous resolution yet, because the
+  GraphStore has no cursor-based enumeration.
+- **Blocking can miss pairs.** Names that share no three-letter token
+  prefix are never compared, and very common values (blocks of more than
+  50 entities) are skipped. Both are reported.
+- **Logical identity only.**
+  - No physical merge, property reconciliation or undo.
+  - An accepted mapping cannot be split in v0.1.
+  - Graph Explorer, GraphRAG and MCP see separate records.
+- **Provenance.** No source-record references, because M4 entities carry
+  none.
+- **Single user.** Decisions are attributed to `local-user`.

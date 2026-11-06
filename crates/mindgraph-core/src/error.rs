@@ -74,6 +74,11 @@ pub enum ApplicationError {
     #[error(transparent)]
     GraphRag(crate::GraphRagError),
 
+    /// An entity resolution request failed (invalid rules, unknown scan or
+    /// candidate, decision conflict, scan timeout).
+    #[error(transparent)]
+    Resolution(crate::ResolutionError),
+
     /// A required backend (metadata database, graph store, source storage)
     /// is unavailable, or the job queue is full.
     #[error("a required backend is unavailable")]

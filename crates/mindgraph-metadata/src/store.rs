@@ -106,6 +106,12 @@ impl PostgresMetadataStore {
         Self { pool }
     }
 
+    /// The entity resolution store (M9) on the same pool and database.
+    #[must_use]
+    pub fn entity_resolution_store(&self) -> crate::PostgresEntityResolutionStore {
+        crate::PostgresEntityResolutionStore::from_pool(self.pool.clone())
+    }
+
     pub(crate) const fn pool(&self) -> &PgPool {
         &self.pool
     }
