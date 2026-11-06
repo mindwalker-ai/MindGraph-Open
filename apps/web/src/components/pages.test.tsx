@@ -101,9 +101,10 @@ describe("HomeScreen", () => {
     for (const button of screen.getAllByRole("button", { name: /Use template/ })) {
       expect((button as HTMLButtonElement).disabled).toBe(true);
     }
-    expect((screen.getByRole("button", { name: /Set up MCP/ }) as HTMLButtonElement).disabled).toBe(
-      true,
+    expect(screen.getByRole("link", { name: /Set up MCP/ }).getAttribute("href")).toBe(
+      "/graphs/g1/integrations/mcp",
     );
+    expect(screen.queryByText(/\/mcp$/)).toBeNull();
   });
 });
 

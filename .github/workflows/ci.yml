@@ -32,8 +32,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: cargo test
         run: cargo test --workspace --locked
-      - name: Domain and core crates stay infrastructure-free (ADR-002)
-        run: make check-domain-boundary check-core-boundary
+      - name: Domain and core crates stay infrastructure-free (ADR-002); MCP reaches Core only over REST (ADR-011)
+        run: make check-domain-boundary check-core-boundary check-mcp-boundary
 
   hugegraph-integration:
     name: HugeGraph 1.7 integration (live)
@@ -56,6 +56,10 @@ jobs:
           MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
       - name: M4 dataset ingestion flow against HugeGraph (examples/fraud)
         run: cargo test -p mindgraph-api --test hugegraph_ingestion --locked -- --ignored
+        env:
+          MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
+      - name: M8 MCP agent flow against HugeGraph (real binary over stdio)
+        run: cargo test -p mindgraph-mcp --test end_to_end --locked -- --ignored --exact an_agent_finds_the_shared_device_over_mcp_on_hugegraph
         env:
           MINDGRAPH_HUGEGRAPH_TEST_URL: http://127.0.0.1:18080
 

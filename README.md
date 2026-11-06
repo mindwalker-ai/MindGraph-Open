@@ -12,10 +12,11 @@ connect your AI agents through MCP.
 Data → Graph → Explore → Ask → Investigate → Connect to AI Agents
 ```
 
-> **Status: pre-alpha.** Milestones **M0** to **M7** are complete: graph
+> **Status: pre-alpha.** Milestones **M0** to **M8** are complete: graph
 > storage, project APIs, dataset ingestion, the AI Graph Builder, the visual
-> Graph Explorer and graph-first GraphRAG (Ask MindGraph). MCP arrives next.
-> See the [roadmap](#roadmap).
+> Graph Explorer, graph-first GraphRAG (Ask MindGraph) and a read-only MCP
+> server for AI agents. Entity resolution arrives next. See the
+> [roadmap](#roadmap).
 
 ---
 
@@ -66,8 +67,8 @@ The AI only *suggests*. The uploaded files, their analysis profiles and the
 suggestion are stored as you go, but no ontology version and no graph data
 are written until you click **Generate Graph**, which uses the same
 endpoints as the curl examples below. When it finishes, **Explore Graph**
-opens the result in the Graph Explorer. Screens of later milestones (MCP,
-templates, the demo) are shown in the navigation but disabled until they
+opens the result in the Graph Explorer. Screens of later milestones
+(templates, the demo) are shown in the navigation but disabled until they
 ship. Without an
 AI provider the builder says so and the manual path works the same way. See
 [Use the AI Graph Builder (M5)](#use-the-ai-graph-builder-m5) to configure a
@@ -130,6 +131,36 @@ device?"*: the evidence is Alice (C001), Budi Santoso (C002), `DEVICE-921`
 and their two `USES` relationships. Ask MindGraph needs a configured model
 (see [GraphRAG](#graphrag-ask-mindgraph-m7)); without one the panel says so
 and exploring keeps working.
+
+### Connect an AI agent over MCP (M8)
+
+`mindgraph-mcp` gives Claude Code, Codex, Cursor or any MCP client
+read-only tools over one graph:
+
+```text
+get_graph_info   get_graph_schema   search_entities   get_entity
+get_neighbors    find_path          get_subgraph      ask_graph (opt-in, GraphRAG)
+```
+
+The client starts the binary over stdio, and the binary calls MindGraph
+Core's REST API on `127.0.0.1`. It never touches PostgreSQL, HugeGraph or
+the AI service. Build it, then copy your client's configuration from
+**MCP** in the sidebar, which fills in the graph id:
+
+```bash
+cargo build -p mindgraph-mcp --release
+claude mcp add --scope project mindgraph \
+  --env MINDGRAPH_MCP_CORE_URL=http://127.0.0.1:8080 \
+  --env MINDGRAPH_MCP_GRAPH_ID=<graph id> \
+  -- "$PWD/target/release/mindgraph-mcp"
+```
+
+Then ask your agent *"Find Customer C001 and show its relationships."*.
+The tools are deterministic and bounded, and search is exact, not
+full-text. `ask_graph` stays off unless you enable it, because it sends
+graph evidence to Core's model provider. See [`docs/mcp/`](docs/mcp/README.md)
+for the tools, security and the [Claude Code](docs/mcp/claude-code.md),
+[Codex](docs/mcp/codex.md) and [Cursor](docs/mcp/cursor.md) guides.
 
 ### Load a dataset without AI (M4)
 
@@ -248,7 +279,8 @@ changes from `draft` to `active`.
           Apache HugeGraph        PostgreSQL           mindgraph-ai
             graph data          app metadata      (Python · FastAPI, internal)
 
-          mindgraph-mcp and mindgraph-cli: additional Rust binaries on the same core
+   AI agents ──stdio──► mindgraph-mcp ──REST (loopback)──► mindgraph-core
+                        (read-only MCP tools, one graph; no database access)
 ```
 
 The architecture is defined by the Architecture Decision Records in
@@ -271,7 +303,7 @@ crates/
   mindgraph-ontology/       Ontology workflows (M3, M5)
   mindgraph-entity-resolution/  Duplicate detection (M9)
   mindgraph-graphrag/       Graph-first retrieval (M7)
-  mindgraph-mcp/            MCP server (M8)
+  mindgraph-mcp/            MCP server over Core's REST API (M8, Apache-2.0)
   mindgraph-cli/            `mindgraph` CLI
 services/ai/                Python AI service (FastAPI, uv)
 docker/                     Dockerfiles for web, core and ai
@@ -586,6 +618,15 @@ Configuration uses environment variables (ADR-013). See
 | `MINDGRAPH_LLM_TIMEOUT_SECONDS` / `_MAX_OUTPUT_TOKENS` / `_JSON_MODE` | ai (M5) | `60` / `4096` / `true` |
 | `MINDGRAPH_LLM_MAX_RETRIES`   | ai (M5)   | `2` (0–2): retries on 429 / 5xx / dropped connections |
 | `MINDGRAPH_TELEMETRY_ENABLED` | all       | `false`                           |
+| `MINDGRAPH_MCP_GRAPH_ID`      | mcp (M8)  | required: the one graph the MCP server exposes |
+| `MINDGRAPH_MCP_CORE_URL`      | mcp (M8)  | `http://127.0.0.1:8080` (loopback only) |
+| `MINDGRAPH_MCP_TIMEOUT_SECONDS` / `_ASK_TIMEOUT_SECONDS` | mcp (M8) | `30` (1–300) / `150` (1–600) |
+| `MINDGRAPH_MCP_MAX_RESULT_BYTES` | mcp (M8) | `262144` (16384–4194304) per tool result |
+| `MINDGRAPH_MCP_ENABLE_ASK`    | mcp (M8)  | `false`; `true` registers `ask_graph` |
+
+The `MINDGRAPH_MCP_*` variables configure `mindgraph-mcp`, which your MCP
+client starts on your machine. They go in the client's configuration, not in
+Compose.
 
 Telemetry is off by default. MindGraph never collects graph contents,
 uploaded datasets, prompts or entity data. Next.js telemetry is disabled in
@@ -603,8 +644,8 @@ the Docker image and in CI.
 | M5        | AI Graph Builder (ontology suggestion, review, generate) | ✅ Done |
 | M6        | Visual Graph Explorer (Sigma.js, Graphology)             | ✅ Done |
 | M7        | GraphRAG with evidence graphs (Ask MindGraph)            | ✅ Done |
-| M8        | MCP server for Claude, Codex and Cursor                  | Next    |
-| M9        | Basic entity resolution                                  | Planned |
+| M8        | MCP server for Claude, Codex and Cursor                  | ✅ Done |
+| M9        | Basic entity resolution                                  | Next    |
 | M10       | Launch hardening and demos                               | Planned |
 
 ## Contributing
@@ -622,5 +663,7 @@ MindGraph Open is licensed under the [GNU AGPL-3.0](LICENSE).
 
 ADR-015 also proposes Apache-2.0 for SDKs, MCP packages and examples. That
 split is **pending final legal approval**. The `mindgraph-mcp` crate manifest
-already declares Apache-2.0. Per-package license files and source headers
-arrive with M10.
+already declares Apache-2.0. The binary links no AGPL crate and reaches Core
+only over HTTP. The points still open for review are listed in
+[`docs/mcp/README.md`](docs/mcp/README.md#licensing-boundary-for-legal-review).
+Per-package license files and source headers arrive with M10.

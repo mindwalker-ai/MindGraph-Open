@@ -18,6 +18,9 @@ POSTGRES_TEST_URL ?= postgres://mindgraph:mindgraph@127.0.0.1:$(POSTGRES_TEST_PO
 FORBIDDEN_DOMAIN_DEPS := axum|axum-core|hyper|http|reqwest|sqlx|sqlx-core|tokio|tower|tonic
 # Crates mindgraph-core (application layer) must never depend on (ADR-002).
 FORBIDDEN_CORE_DEPS := axum|axum-core|hyper|reqwest|sqlx|sqlx-core|sqlx-postgres|tokio-postgres|tower
+# mindgraph-mcp (Apache-2.0, ADR-015) reaches MindGraph only over Core's REST
+# API (ADR-011, M8): it must not link another MindGraph crate or a database.
+FORBIDDEN_MCP_DEPS := mindgraph-[a-z-]+|sqlx|sqlx-core|sqlx-postgres|tokio-postgres
 
 .PHONY: help
 help: ## Show available targets
@@ -60,7 +63,7 @@ dev-ai: ## Run the AI service on 127.0.0.1:8000
 
 # --- Quality gates (mirror CI) -----------------------------------------------
 
-.PHONY: check fmt rust-check web-check ai-check check-domain-boundary check-core-boundary
+.PHONY: check fmt rust-check web-check ai-check check-domain-boundary check-core-boundary check-mcp-boundary
 check: rust-check web-check ai-check ## Run every CI check locally
 
 fmt: ## Format Rust, TypeScript and Python code
@@ -68,7 +71,7 @@ fmt: ## Format Rust, TypeScript and Python code
 	cd $(WEB_DIR) && npm run format
 	cd $(AI_DIR) && uv run ruff format .
 
-rust-check: check-domain-boundary check-core-boundary ## cargo fmt --check, clippy and tests
+rust-check: check-domain-boundary check-core-boundary check-mcp-boundary ## cargo fmt --check, clippy and tests
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked
@@ -95,6 +98,25 @@ check-core-boundary: ## Fail if mindgraph-core depends on HTTP or database crate
 	fi; \
 	echo "mindgraph-core dependency boundary OK"
 
+check-mcp-boundary: ## Fail if mindgraph-mcp links a MindGraph server crate or a database driver
+	@deps=$$(cargo tree -p mindgraph-mcp -e normal --locked --prefix none --format '{p}' | awk '{print $$1}' | grep -vx 'mindgraph-mcp' | sort -u); \
+	bad=$$(echo "$$deps" | grep -xE '$(FORBIDDEN_MCP_DEPS)' || true); \
+	if [ -n "$$bad" ]; then \
+		echo "mindgraph-mcp must not depend on: $$bad (ADR-011, ADR-015)"; exit 1; \
+	fi; \
+	echo "mindgraph-mcp dependency boundary OK"
+
+# --- MCP server (M8) ---------------------------------------------------------
+
+.PHONY: mcp-build test-mcp-live
+mcp-build: ## Build the mindgraph-mcp binary (target/release/mindgraph-mcp)
+	cargo build -p mindgraph-mcp --release --locked
+
+test-mcp-live: ## Run the MCP agent flow against a running Core (MINDGRAPH_MCP_LIVE_CORE_URL, default http://127.0.0.1:8080)
+	MINDGRAPH_MCP_LIVE_CORE_URL=$${MINDGRAPH_MCP_LIVE_CORE_URL:-http://127.0.0.1:8080} \
+		cargo test -p mindgraph-mcp --test end_to_end --locked -- --ignored --exact \
+		an_agent_finds_the_shared_device_over_mcp_on_a_running_core
+
 # --- Live HugeGraph integration tests (opt-in) -------------------------------
 
 .PHONY: hugegraph-test-up hugegraph-test-down test-hugegraph
@@ -108,11 +130,14 @@ hugegraph-test-up: ## Start a throwaway HugeGraph 1.7 on 127.0.0.1:18080 for liv
 hugegraph-test-down: ## Stop the throwaway HugeGraph (its data is discarded)
 	$(CONTAINER) rm -f mindgraph-hugegraph-test
 
-test-hugegraph: ## Run the GraphStore contract and the M4 ingestion flow against a live HugeGraph (see hugegraph-test-up)
+test-hugegraph: ## Run the GraphStore contract, the M4 ingestion flow and the M8 MCP flow against a live HugeGraph (see hugegraph-test-up)
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-graph --test hugegraph_integration --locked -- --ignored
 	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
 		cargo test -p mindgraph-api --test hugegraph_ingestion --locked -- --ignored
+	MINDGRAPH_HUGEGRAPH_TEST_URL=http://127.0.0.1:$(HUGEGRAPH_TEST_PORT) \
+		cargo test -p mindgraph-mcp --test end_to_end --locked -- --ignored --exact \
+		an_agent_finds_the_shared_device_over_mcp_on_hugegraph
 
 # --- Live PostgreSQL integration tests (opt-in) ------------------------------
 

@@ -5,12 +5,41 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 # ADR-015: MCP packages are proposed as Apache-2.0 (pending legal approval).
+# The binary talks to MindGraph Core over its public REST API only; it does
+# not link any AGPL crate (see docs/mcp/README.md, "Licensing boundary").
 license = "Apache-2.0"
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "mindgraph-mcp"
+path = "src/main.rs"
+
 [dependencies]
+reqwest.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+# Tests only: never linked into the `mindgraph-mcp` binary. The protocol tests
+# drive the real binary with the rmcp client, and the end-to-end tests serve
+# the real MindGraph Core router in-process over in-memory stores.
+[dev-dependencies]
+async-trait.workspace = true
+axum.workspace = true
+mindgraph-api = { path = "../mindgraph-api" }
 mindgraph-core.workspace = true
+mindgraph-domain.workspace = true
+mindgraph-graph = { workspace = true, features = ["hugegraph"] }
+mindgraph-ingestion.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true
