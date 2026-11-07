@@ -1,0 +1,7 @@
+person_id,name,role,company_id,company_name,industry,since
+P01,Sari Anggraini,Research Lead,CO-ARN,Arunika Labs,Applied AI research,2021-04-01T09:00:00Z
+P02,Bayu Wicaksono,Data Engineer,CO-ARN,Arunika Labs,Applied AI research,2023-01-09T09:00:00Z
+P03,Lestari Putri,Product Manager,CO-KLN,Kalana Systems,Industrial software,2020-07-15T09:00:00Z
+P04,Hendra Gunawan,Platform Engineer,CO-KLN,Kalana Systems,Industrial software,2022-02-21T09:00:00Z
+P05,Nadia Rahman,Hydrologist,CO-TRT,Tirta Data,Water utility analytics,2019-10-01T09:00:00Z
+P06,Fajar Nugroho,ML Engineer,CO-TRT,Tirta Data,Water utility analytics,2024-03-04T09:00:00Z

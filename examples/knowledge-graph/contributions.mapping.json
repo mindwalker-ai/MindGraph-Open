@@ -1,0 +1,56 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "person",
+        "entity_type": "Person",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "person_id",
+            "property": "person_id"
+          }
+        ],
+        "properties": []
+      },
+      {
+        "alias": "project",
+        "entity_type": "Project",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "project_id",
+            "property": "project_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "project_id",
+            "property": "project_id"
+          },
+          {
+            "source_field": "project_name",
+            "property": "name"
+          },
+          {
+            "source_field": "status",
+            "property": "status"
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "CONTRIBUTES_TO",
+        "source": "person",
+        "target": "project",
+        "properties": [
+          {
+            "source_field": "contribution_role",
+            "property": "contribution_role"
+          }
+        ]
+      }
+    ]
+  }
+}

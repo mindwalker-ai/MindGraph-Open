@@ -213,13 +213,23 @@ struct Ready {
     status: &'static str,
 }
 
-/// Readiness: checks that PostgreSQL is reachable.
+/// How long `/ready` waits for each storage backend before answering 503.
+const READY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Readiness: checks that PostgreSQL and the graph store (HugeGraph) answer
+/// within [`READY_CHECK_TIMEOUT`] each. `/health` only says the process is
+/// up; `/ready` says requests can succeed.
 async fn ready(State(state): State<AppState>) -> Result<Json<Ready>, ApiError> {
-    state
-        .graph_projects
-        .check_ready()
-        .await
-        .map_err(|_| ApiError::not_ready())?;
+    let metadata = tokio::time::timeout(READY_CHECK_TIMEOUT, state.graph_projects.check_ready());
+    if !matches!(metadata.await, Ok(Ok(()))) {
+        return Err(ApiError::not_ready());
+    }
+    if let Some(explorer) = &state.graph_explorer {
+        let graph = tokio::time::timeout(READY_CHECK_TIMEOUT, explorer.check_ready());
+        if !matches!(graph.await, Ok(Ok(()))) {
+            return Err(ApiError::not_ready());
+        }
+    }
     Ok(Json(Ready { status: "ready" }))
 }
 

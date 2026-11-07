@@ -3,13 +3,12 @@
 /**
  * The application shell of the mockup: a 220px sidebar (home, create and
  * upload pages) or a 52px icon rail (the Graph Builder), both listing the
- * same destinations. Destinations that later milestones build are shown,
- * disabled, with the milestone in their tooltip.
+ * same destinations. Only destinations that exist in v0.1 are listed; the
+ * graph-scoped ones are disabled until a graph is open.
  */
 
 import {
   BrainCircuit,
-  Box,
   ChevronsUpDown,
   CodeXml,
   CopyCheck,
@@ -17,29 +16,30 @@ import {
   type LucideIcon,
   MessageSquareText,
   Network,
-  Package,
+  Play,
   Plug,
-  Search,
-  Settings,
-  Spline,
-  SquareTerminal,
   Waypoints,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useSyncExternalStore } from "react";
 
-import { Mark, comingIn } from "@/components/ui/primitives";
+import { Mark } from "@/components/ui/primitives";
+import { STATUS_DOT, STATUS_LABEL, useCoreStatus } from "@/lib/api/status";
 import { cn } from "@/lib/utils";
 
-export const APP_VERSION = "v0.1.0";
+export const APP_VERSION = "v0.1.0-alpha.1";
+
+/** The REST API reference, kept with the source. */
+const API_DOCS = "https://github.com/mindwalker-ai/MindGraph-Open/blob/main/docs/api/README.md";
 
 interface NavItem {
   label: string;
   icon: LucideIcon;
-  /** Where it leads, given the current graph; `null` when not available. */
+  /** Where it leads, given the current graph; `null` until a graph is open. */
   href: (graphId?: string) => string | null;
-  milestone?: string;
+  /** Opens outside the app, in a new tab. */
+  external?: boolean;
 }
 
 const GROUPS: { label: string; items: NavItem[] }[] = [
@@ -51,13 +51,12 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
         icon: Waypoints,
         href: (graphId) => (graphId ? `/graphs/${graphId}/explore` : null),
       },
-      { label: "Search", icon: Search, href: () => null },
       {
         label: "Ask",
         icon: MessageSquareText,
         href: (graphId) => (graphId ? `/graphs/${graphId}/explore?ask=1` : null),
       },
-      { label: "Queries", icon: SquareTerminal, href: () => null },
+      { label: "Demos", icon: Play, href: () => "/demos" },
     ],
   },
   {
@@ -68,8 +67,6 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
         icon: Database,
         href: (graphId) => (graphId ? `/graphs/${graphId}/upload` : null),
       },
-      { label: "Entities", icon: Box, href: () => null },
-      { label: "Relationships", icon: Spline, href: () => null },
       {
         label: "Ontology",
         icon: Network,
@@ -99,14 +96,9 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
   },
   {
     label: "DEVELOPER",
-    items: [
-      { label: "API", icon: CodeXml, href: () => null },
-      { label: "SDK", icon: Package, href: () => null },
-    ],
+    items: [{ label: "API", icon: CodeXml, href: () => API_DOCS, external: true }],
   },
 ];
-
-const SETTINGS: NavItem = { label: "Settings", icon: Settings, href: () => null };
 
 /** The browser's host (`localhost:3000`), empty during server rendering. */
 function useHost(): string {
@@ -117,15 +109,12 @@ function useHost(): string {
   );
 }
 
-function disabledTitle(item: NavItem, graphId?: string): string {
-  if (item.milestone) return comingIn(item.milestone);
-  if (
-    !graphId &&
-    ["Graph", "Ask", "GraphRAG", "MCP", "Sources", "Ontology", "Resolution"].includes(item.label)
-  ) {
-    return "Open a graph first";
-  }
-  return comingIn();
+/** Why a graph-scoped destination is unavailable. */
+const DISABLED_TITLE = "Open a graph first";
+
+/** Link props: in-app, or a new tab for documentation. */
+function linkProps(item: NavItem) {
+  return item.external ? { target: "_blank", rel: "noreferrer" } : {};
 }
 
 function SidebarItem({ item, graphId }: { item: NavItem; graphId?: string }) {
@@ -143,7 +132,7 @@ function SidebarItem({ item, graphId }: { item: NavItem; graphId?: string }) {
     return (
       <span
         aria-disabled
-        title={disabledTitle(item, graphId)}
+        title={DISABLED_TITLE}
         className={cn(base, "cursor-not-allowed text-text-3")}
       >
         {content}
@@ -154,6 +143,7 @@ function SidebarItem({ item, graphId }: { item: NavItem; graphId?: string }) {
   return (
     <Link
       href={href}
+      {...linkProps(item)}
       aria-current={active ? "page" : undefined}
       className={cn(
         base,
@@ -167,6 +157,7 @@ function SidebarItem({ item, graphId }: { item: NavItem; graphId?: string }) {
 
 export function Sidebar({ graphId, graphName }: { graphId?: string; graphName?: string }) {
   const host = useHost();
+  const status = useCoreStatus();
   return (
     <aside className="sticky top-0 flex h-screen w-[220px] shrink-0 flex-col gap-1 overflow-y-auto border-r border-border bg-panel px-[10px] py-[14px]">
       <Link href="/" className="flex items-center gap-2 px-[6px] pt-[2px] pb-[10px]">
@@ -185,15 +176,6 @@ export function Sidebar({ graphId, graphName }: { graphId?: string; graphName?: 
         <span className="flex-1 truncate text-[13px] text-text">{graphName ?? "All graphs"}</span>
         <ChevronsUpDown size={14} className="text-text-3" />
       </Link>
-      <span
-        aria-disabled
-        title={comingIn()}
-        className="flex w-full cursor-not-allowed items-center gap-2 rounded-[4px] border border-border px-2 py-[7px]"
-      >
-        <Search size={14} className="text-text-3" />
-        <span className="flex-1 text-[13px] text-text-3">Search or run…</span>
-        <span className="font-mono text-[10px] font-medium text-text-3">⌘K</span>
-      </span>
       <nav className="flex flex-col" aria-label="Main">
         {GROUPS.map((group) => (
           <div key={group.label} className="flex flex-col gap-px pt-[10px]">
@@ -207,9 +189,12 @@ export function Sidebar({ graphId, graphName }: { graphId?: string; graphName?: 
         ))}
       </nav>
       <div className="flex-1" />
-      <SidebarItem item={SETTINGS} graphId={graphId} />
-      <div className="flex items-center gap-2 border-t border-border px-2 pt-[10px]">
-        <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+      <div
+        className="flex items-center gap-2 border-t border-border px-2 pt-[10px]"
+        title={STATUS_LABEL[status]}
+      >
+        <span className={cn("h-1.5 w-1.5 rounded-full", STATUS_DOT[status])} />
+        <span className="sr-only">{STATUS_LABEL[status]}</span>
         <span className="flex-1 truncate font-mono text-[10px] font-medium text-text-3">
           {host}
         </span>
@@ -229,7 +214,7 @@ function RailItem({ item, graphId }: { item: NavItem; graphId?: string }) {
       <span
         aria-disabled
         aria-label={item.label}
-        title={`${item.label} · ${disabledTitle(item, graphId)}`}
+        title={`${item.label} · ${DISABLED_TITLE}`}
         className={cn(base, "cursor-not-allowed text-text-3")}
       >
         <Icon size={16} strokeWidth={1.75} />
@@ -240,6 +225,7 @@ function RailItem({ item, graphId }: { item: NavItem; graphId?: string }) {
   return (
     <Link
       href={href}
+      {...linkProps(item)}
       aria-label={item.label}
       title={item.label}
       className={cn(
@@ -253,6 +239,7 @@ function RailItem({ item, graphId }: { item: NavItem; graphId?: string }) {
 }
 
 export function Rail({ graphId }: { graphId?: string }) {
+  const status = useCoreStatus();
   return (
     <aside className="sticky top-0 flex h-screen w-[52px] shrink-0 flex-col items-center gap-1 border-r border-border bg-panel py-[14px]">
       <Link href="/" aria-label="All graphs" className="pb-[10px]">
@@ -267,8 +254,12 @@ export function Rail({ graphId }: { graphId?: string }) {
         </div>
       ))}
       <div className="flex-1" />
-      <RailItem item={SETTINGS} graphId={graphId} />
-      <span className="mt-1 h-1.5 w-1.5 rounded-full bg-ok" title="Core is running" />
+      <span
+        role="status"
+        aria-label={STATUS_LABEL[status]}
+        title={STATUS_LABEL[status]}
+        className={cn("mt-1 h-1.5 w-1.5 rounded-full", STATUS_DOT[status])}
+      />
     </aside>
   );
 }

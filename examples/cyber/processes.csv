@@ -1,0 +1,7 @@
+process_id,endpoint_id,name,executable_path,started_at
+PROC-3001,WS-FIN-07,mailclient.exe,C:\Program Files\MailClient\mailclient.exe,2026-10-02T08:06:12Z
+PROC-3107,WS-FIN-07,updater.exe,C:\Users\jsantoso\AppData\Local\Temp\updater.exe,2026-10-02T13:42:10Z
+PROC-4410,WS-FIN-12,browser.exe,C:\Program Files\Browser\browser.exe,2026-10-02T08:21:40Z
+PROC-4415,WS-FIN-12,updater.exe,C:\Users\apratama\AppData\Local\Temp\updater.exe,2026-10-02T14:05:02Z
+PROC-5120,SRV-FILE-01,backup-agent,/opt/backup/bin/backup-agent,2026-10-02T02:00:05Z
+PROC-6022,WS-IT-03,ssh,/usr/bin/ssh,2026-10-02T08:30:00Z

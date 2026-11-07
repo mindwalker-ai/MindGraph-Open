@@ -1,0 +1,43 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "document",
+        "entity_type": "Document",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "document_id",
+            "property": "document_id"
+          }
+        ],
+        "properties": []
+      },
+      {
+        "alias": "project",
+        "entity_type": "Project",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "project_id",
+            "property": "project_id"
+          }
+        ],
+        "properties": []
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "REFERENCES",
+        "source": "document",
+        "target": "project",
+        "properties": [
+          {
+            "source_field": "section",
+            "property": "section"
+          }
+        ]
+      }
+    ]
+  }
+}

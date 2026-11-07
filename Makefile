@@ -4,6 +4,9 @@ SHELL := /bin/bash
 WEB_DIR := apps/web
 AI_DIR := services/ai
 
+# Compose command for the stack and the demos; Podman works too:
+# `make demo-fraud COMPOSE="podman compose"`.
+COMPOSE ?= docker compose
 # Container engine for the throwaway HugeGraph used by live tests
 # (`make hugegraph-test-up CONTAINER=podman` works too).
 CONTAINER ?= docker
@@ -34,16 +37,55 @@ help: ## Show available targets
 
 .PHONY: up down logs ps
 up: ## Build and start the full stack (web, core, ai, postgres, hugegraph)
-	docker compose up --build
+	$(COMPOSE) up --build
 
-down: ## Stop the stack (keeps data volumes)
-	docker compose down
+down: ## Stop the stack (keeps data volumes; `down -v` would delete them)
+	$(COMPOSE) down
 
 logs: ## Follow logs of all services
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 ps: ## Show service status and health
-	docker compose ps
+	$(COMPOSE) ps
+
+# --- Demo scenarios (M10) ----------------------------------------------------
+# Each target starts the stack in the background if needed, then loads
+# examples/<scenario> through Core's REST API with the one-shot `demo` service.
+# Re-running reuses and verifies the existing demo graph; nothing is deleted.
+
+.PHONY: demo-fraud demo-cyber demo-knowledge demo-list smoke smoke-stack
+demo-fraud: ## Load the fraud investigation demo and print its Explorer link
+	$(COMPOSE) up -d
+	$(COMPOSE) --profile demo run --rm demo fraud
+
+demo-cyber: ## Load the cyber investigation demo and print its Explorer link
+	$(COMPOSE) up -d
+	$(COMPOSE) --profile demo run --rm demo cyber
+
+demo-knowledge: ## Load the company knowledge graph demo and print its Explorer link
+	$(COMPOSE) up -d
+	$(COMPOSE) --profile demo run --rm demo knowledge-graph
+
+demo-list: ## List the demo scenarios
+	$(COMPOSE) --profile demo run --rm --no-deps demo --list
+
+smoke: ## Smoke-test a running stack through its published ports (after make demo-fraud)
+	scripts/smoke.sh
+
+smoke-stack: ## Build an isolated stack (project mindgraph-smoke), load a demo, smoke-test, restart, clean up (E2E=1 adds browser tests)
+	COMPOSE="$(COMPOSE)" scripts/smoke-stack.sh $(if $(E2E),--e2e)
+
+# --- Release checks (M10) ------------------------------------------------------
+
+.PHONY: audit check-openapi
+audit: ## Dependency audit: cargo-deny (advisories, licenses), npm audit (production), pip-audit (AI runtime)
+	cargo deny check
+	cd $(WEB_DIR) && npm audit --omit=dev
+	cd $(AI_DIR) && uv export --no-dev --no-hashes --no-emit-project --frozen > ../../target/ai-requirements.txt
+	uv tool run --from pip-audit==2.9.0 pip-audit -r target/ai-requirements.txt --no-deps --disable-pip --progress-spinner off
+
+check-openapi: ## Validate docs/api/openapi.yaml and compare it with the Axum router
+	uv run --no-project --with pyyaml==6.0.3 --with openapi-spec-validator==0.9.0 python scripts/check_openapi.py
 
 # --- Setup -------------------------------------------------------------------
 

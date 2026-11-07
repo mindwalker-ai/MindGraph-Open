@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an idea or a missing capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [known limitations](https://github.com/mindwalker-ai/MindGraph-Open/blob/main/docs/release/KNOWN_LIMITATIONS.md)
+        and existing issues first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you considered

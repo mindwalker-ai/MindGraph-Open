@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: MindGraph Open API
-  version: 0.1.0
+  version: 0.1.0-alpha.1
   description: |
     Public HTTP API of `mindgraph-core` (ADR-006).
 
@@ -82,10 +82,11 @@ paths:
     get:
       tags: [operations]
       operationId: getReadiness
-      summary: Readiness check (PostgreSQL reachable)
+      summary: Readiness check (PostgreSQL and HugeGraph reachable)
       description: |
-        Checks PostgreSQL. HugeGraph is checked once at startup (the server
-        does not start without it) but not by this endpoint in v0.1.
+        Checks that PostgreSQL answers and that HugeGraph answers with
+        MindGraph's schema in place, waiting at most 3 seconds for each.
+        `/health` is liveness only.
       responses:
         "200":
           description: Required infrastructure is reachable.

@@ -67,7 +67,7 @@ impl ApiError {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "NOT_READY",
-            "The metadata database is not reachable",
+            "A storage backend (PostgreSQL or the graph store) is not reachable",
         )
     }
 }

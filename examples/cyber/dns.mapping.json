@@ -1,0 +1,57 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "domain",
+        "entity_type": "Domain",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "domain",
+            "property": "domain"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "domain",
+            "property": "domain"
+          }
+        ]
+      },
+      {
+        "alias": "ip",
+        "entity_type": "IPAddress",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "ip_address",
+            "property": "address"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "ip_address",
+            "property": "address"
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "RESOLVED_TO",
+        "source": "domain",
+        "target": "ip",
+        "properties": [
+          {
+            "source_field": "record_type",
+            "property": "record_type"
+          },
+          {
+            "source_field": "resolved_at",
+            "property": "resolved_at"
+          }
+        ]
+      }
+    ]
+  }
+}

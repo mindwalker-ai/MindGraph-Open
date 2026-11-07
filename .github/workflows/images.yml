@@ -1,0 +1,50 @@
+name: Container images (manual)
+
+# Builds the web, core and ai images. Runs only when started by hand
+# (Actions → Container images → Run workflow) and pushes to ghcr.io only when
+# the "push" input is checked. Nothing is published automatically.
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the images to ghcr.io (otherwise build only)"
+        type: boolean
+        default: false
+      tag:
+        description: "Image tag, e.g. v0.1.0-alpha.1 (defaults to the commit SHA)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    name: Build${{ inputs.push && ' and push' || '' }} images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="${TAG:-$GITHUB_SHA}"
+          docker build -f docker/core.Dockerfile -t "ghcr.io/$owner/mindgraph-core:$tag" .
+          docker build -f docker/web.Dockerfile -t "ghcr.io/$owner/mindgraph-web:$tag" apps/web
+          docker build -f docker/ai.Dockerfile -t "ghcr.io/$owner/mindgraph-ai:$tag" services/ai
+          docker image ls "ghcr.io/$owner/*"
+      - name: Push
+        if: inputs.push
+        env:
+          TAG: ${{ inputs.tag }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="${TAG:-$GITHUB_SHA}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for image in core web ai; do docker push "ghcr.io/$owner/mindgraph-$image:$tag"; done

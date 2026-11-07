@@ -36,6 +36,18 @@ use crate::{EntitySearch, GraphPath, GraphStoreError, NeighborQuery, PathQuery, 
 /// - **Bounded work.** Query objects cap result sizes and traversal depth.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
+    /// Checks that the backend answers and its schema is in place; Core's
+    /// readiness probe (`GET /ready`) calls it. In-process stores are always
+    /// ready, which is the default.
+    ///
+    /// # Errors
+    ///
+    /// [`BackendUnavailable`](GraphStoreError::BackendUnavailable) or
+    /// another backend error when the store cannot serve requests.
+    async fn ping(&self) -> Result<(), GraphStoreError> {
+        Ok(())
+    }
+
     /// Stores one entity.
     ///
     /// # Errors

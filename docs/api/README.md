@@ -6,7 +6,7 @@ The public API is versioned JSON REST (ADR-006). The authoritative contract is
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET`  | `/health` | Liveness. Never touches the database. |
-| `GET`  | `/ready` | Readiness. `200` when PostgreSQL is reachable, `503 NOT_READY` otherwise. |
+| `GET`  | `/ready` | Readiness. `200` when PostgreSQL and HugeGraph answer (3 s each), `503 NOT_READY` otherwise. |
 | `POST` | `/api/v1/graphs` | Create a graph project (`201`, `Location` header) with an empty ontology v1. |
 | `GET`  | `/api/v1/graphs?limit=50` | List graph projects, newest first (`limit` 1–100). |
 | `GET`  | `/api/v1/graphs/{graph_id}` | Read a graph project. |

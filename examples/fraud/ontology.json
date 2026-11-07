@@ -29,6 +29,26 @@
         { "name": "device_id", "type": "string", "required": true },
         { "name": "device_type", "type": "string", "required": false }
       ]
+    },
+    {
+      "name": "Transaction",
+      "display_name": "Transaction",
+      "properties": [
+        { "name": "transaction_id", "type": "string", "required": true },
+        { "name": "amount", "type": "float", "required": true },
+        { "name": "currency", "type": "string", "required": false },
+        { "name": "channel", "type": "string", "required": false },
+        { "name": "occurred_at", "type": "datetime", "required": false }
+      ]
+    },
+    {
+      "name": "Merchant",
+      "display_name": "Merchant",
+      "properties": [
+        { "name": "merchant_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true },
+        { "name": "category", "type": "string", "required": false }
+      ]
     }
   ],
   "relationship_types": [
@@ -43,6 +63,18 @@
       "source_entity_type": "Customer",
       "target_entity_type": "Device",
       "properties": [{ "name": "first_seen", "type": "datetime", "required": false }]
+    },
+    {
+      "name": "SENT",
+      "source_entity_type": "Account",
+      "target_entity_type": "Transaction",
+      "properties": []
+    },
+    {
+      "name": "TO",
+      "source_entity_type": "Transaction",
+      "target_entity_type": "Merchant",
+      "properties": []
     }
   ]
 }

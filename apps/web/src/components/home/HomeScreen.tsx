@@ -2,21 +2,21 @@
 
 /**
  * The home route: the welcome screen (mockup 01) until a graph exists, then
- * "Your Graphs" (mockup 02). Templates, the demo and MCP are shown as in the
- * design but disabled until their milestones.
+ * "Your Graphs" (mockup 02). "Explore Demo" and the demo list lead to the
+ * demo scenarios (`/demos`), which `make demo-<name>` loads.
  */
 
 import {
   ArrowRight,
   BookOpen,
-  Bug,
   Copy,
-  Ellipsis,
   FolderGit2,
   Library,
+  type LucideIcon,
   Play,
   Plug,
   Plus,
+  Radar,
   ShieldAlert,
   Upload,
   Waypoints,
@@ -27,9 +27,11 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { lookOf } from "@/components/builder/appearance";
 import { HeroGraph } from "@/components/home/HeroGraph";
 import { APP_VERSION, AppShell } from "@/components/shell/AppShell";
-import { Button, ErrorNote, Kicker, Mark, comingIn } from "@/components/ui/primitives";
+import { ErrorNote, Kicker, Mark } from "@/components/ui/primitives";
 import { type ApiClient, ApiError, createApiClient } from "@/lib/api/client";
 import type { GraphProject, Ontology } from "@/lib/api/types";
+import { STATUS_DOT, STATUS_LABEL, useCoreStatus } from "@/lib/api/status";
+import { DEMOS, type DemoScenario, demoGraph } from "@/lib/demos";
 
 const REPOSITORY = "https://github.com/mindwalker-ai/MindGraph-Open";
 
@@ -72,6 +74,7 @@ export function HomeScreen({ api: injected }: { api?: ApiClient }) {
 
 export function Welcome() {
   const host = useHost();
+  const status = useCoreStatus();
   return (
     <div className="relative min-h-screen overflow-hidden bg-bg">
       <div className="absolute top-[70px] left-[650px] hidden xl:block">
@@ -101,8 +104,12 @@ export function Welcome() {
         >
           <FolderGit2 size={14} /> GitHub
         </a>
-        <span className="flex items-center gap-[7px] rounded-[4px] border border-border px-[10px] py-[5px]">
-          <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+        <span
+          title={STATUS_LABEL[status]}
+          className="flex items-center gap-[7px] rounded-[4px] border border-border px-[10px] py-[5px]"
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[status]}`} />
+          <span className="sr-only">{STATUS_LABEL[status]}</span>
           <span className="font-mono text-[10px] font-medium text-text-2">{host}</span>
         </span>
       </header>
@@ -131,13 +138,12 @@ export function Welcome() {
             >
               <Plus size={16} /> Create Graph
             </Link>
-            <span
-              aria-disabled
-              title={comingIn("M10")}
-              className="inline-flex h-[42px] cursor-not-allowed items-center gap-2 rounded-[4px] border border-border-strong bg-raised px-[18px] text-[15px] font-semibold text-text-3"
+            <Link
+              href="/demos"
+              className="inline-flex h-[42px] items-center gap-2 rounded-[4px] border border-border-strong bg-raised px-[18px] text-[15px] font-semibold text-text hover:bg-hover"
             >
               <Play size={15} /> Explore Demo
-            </span>
+            </Link>
           </div>
           <div className="flex items-center">
             {["GRAPHRAG", "MCP", "ENTITY RESOLUTION", "INVESTIGATION"].map((cap, index) => (
@@ -310,14 +316,14 @@ function GraphCard({
           >
             {graph.name}
           </Link>
-          <span title={comingIn()} className="text-text-3">
-            <Ellipsis size={14} />
-          </span>
         </div>
-        <div className="flex gap-6" title="Graph-wide counts are not computed yet">
-          {["entities", "relationships"].map((label) => (
+        <div className="flex gap-6">
+          {[
+            ["entity types", ontology?.entity_types.length],
+            ["relationship types", ontology?.relationship_types.length],
+          ].map(([label, count]) => (
             <div key={label} className="flex flex-col">
-              <span className="text-[18px] font-semibold text-text-3">—</span>
+              <span className="text-[18px] font-semibold">{count ?? "–"}</span>
               <span className="font-mono text-[10px] font-medium text-text-3">{label}</span>
             </div>
           ))}
@@ -349,29 +355,11 @@ function GraphCard({
   );
 }
 
-const TEMPLATES = [
-  {
-    name: "Fraud Investigation",
-    description: "Trace shared devices, IPs and merchants across accounts.",
-    entities: "Customer · Account · Transaction · Merchant · Device · IP",
-    icon: ShieldAlert,
-    color: "var(--risk)",
-  },
-  {
-    name: "Knowledge Graph",
-    description: "Map people, companies, topics and documents.",
-    entities: "Person · Company · Topic · Document · Project",
-    icon: Library,
-    color: "var(--t-customer)",
-  },
-  {
-    name: "Cyber Investigation",
-    description: "Follow users, endpoints and domains to malware.",
-    entities: "User · Endpoint · IP · Domain · Process · Malware",
-    icon: Bug,
-    color: "var(--t-ip)",
-  },
-];
+const DEMO_ICONS: Record<DemoScenario["slug"], LucideIcon> = {
+  fraud: ShieldAlert,
+  cyber: Radar,
+  "knowledge-graph": Library,
+};
 
 function YourGraphs({ api, graphs }: { api: ApiClient; graphs: GraphProject[] }) {
   const [ontologies, setOntologies] = useState<Record<string, Ontology | null>>({});
@@ -443,40 +431,42 @@ function YourGraphs({ api, graphs }: { api: ApiClient; graphs: GraphProject[] })
           )}
         </section>
 
-        <section className="flex flex-col gap-3">
-          <div className="flex items-center">
-            <h2 className="flex-1 text-[17px] font-bold">Explore Templates</h2>
+        <section className="flex flex-col gap-3" aria-labelledby="demo-scenarios">
+          <div className="flex items-center gap-4">
+            <h2 id="demo-scenarios" className="flex-1 text-[17px] font-bold">
+              Demo Scenarios
+            </h2>
             <Kicker>SAMPLE DATA INCLUDED · RUNS LOCALLY</Kicker>
           </div>
           <ul className="flex flex-col rounded-[8px] border border-border">
-            {TEMPLATES.map((template, index) => {
-              const Icon = template.icon;
+            {DEMOS.map((demo, index) => {
+              const Icon = DEMO_ICONS[demo.slug];
+              const loaded = demoGraph(demo, graphs);
               return (
                 <li
-                  key={template.name}
-                  className={`flex h-16 items-center gap-[14px] px-4 ${index ? "border-t border-border" : ""}`}
+                  key={demo.slug}
+                  className={`flex min-h-16 items-center gap-[14px] px-4 py-3 ${index ? "border-t border-border" : ""}`}
                 >
                   <span
-                    className="flex h-[34px] w-[34px] items-center justify-center rounded-[6px] border border-border-strong"
-                    style={{ color: template.color }}
+                    className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[6px] border border-border-strong"
+                    style={{ color: demo.color }}
                   >
-                    <Icon size={16} />
+                    <Icon size={16} aria-hidden />
                   </span>
-                  <div className="flex w-[340px] flex-col gap-px">
-                    <span className="text-[14px] font-bold">{template.name}</span>
-                    <span className="text-[12.5px] text-text-3">{template.description}</span>
+                  <div className="flex min-w-0 flex-col gap-px lg:w-[380px]">
+                    <span className="text-[14px] font-bold">{demo.title}</span>
+                    <span className="text-[12.5px] text-text-3">{demo.description}</span>
                   </div>
                   <span className="hidden flex-1 font-mono text-[10.5px] font-medium text-text-2 lg:block">
-                    {template.entities}
+                    {demo.entityTypes.join(" · ")}
                   </span>
-                  <Button
-                    size="sm"
-                    disabled
-                    title={comingIn("M10")}
-                    className="ml-auto h-7 border-border-strong bg-transparent px-[10px] text-[12.5px]"
+                  <Link
+                    href={loaded ? `/graphs/${loaded.id}/explore` : `/demos#${demo.slug}`}
+                    aria-label={`${loaded ? "Open" : "Load"} the ${demo.title} demo`}
+                    className="ml-auto inline-flex h-7 shrink-0 items-center gap-[5px] rounded-[4px] border border-border-strong px-[10px] text-[12.5px] font-semibold text-text hover:bg-hover"
                   >
-                    Use template <ArrowRight size={12} />
-                  </Button>
+                    {loaded ? "Open demo" : "Load demo"} <ArrowRight size={12} aria-hidden />
+                  </Link>
                 </li>
               );
             })}

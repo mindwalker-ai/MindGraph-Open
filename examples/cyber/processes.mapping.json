@@ -1,0 +1,55 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "process",
+        "entity_type": "Process",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "process_id",
+            "property": "process_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "process_id",
+            "property": "process_id"
+          },
+          {
+            "source_field": "name",
+            "property": "name"
+          },
+          {
+            "source_field": "executable_path",
+            "property": "executable_path"
+          },
+          {
+            "source_field": "started_at",
+            "property": "started_at"
+          }
+        ]
+      },
+      {
+        "alias": "endpoint",
+        "entity_type": "Endpoint",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "endpoint_id",
+            "property": "endpoint_id"
+          }
+        ],
+        "properties": []
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "EXECUTED",
+        "source": "endpoint",
+        "target": "process",
+        "properties": []
+      }
+    ]
+  }
+}

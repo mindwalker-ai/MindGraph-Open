@@ -1,0 +1,84 @@
+{
+  "title": "Fraud investigation",
+  "summary": "customers, accounts, shared devices, card transactions and merchants, with near-duplicate KYC records",
+  "graph": {
+    "name": "Demo: Fraud investigation",
+    "description": "Synthetic fraud investigation demo loaded by `make demo-fraud`. All people, accounts and merchants are fictional."
+  },
+  "ontology": "ontology.json",
+  "sources": [
+    { "file": "customers.csv", "mapping": "customers.mapping.json" },
+    { "file": "accounts.csv", "mapping": "accounts.mapping.json" },
+    { "file": "devices.csv", "mapping": "devices.mapping.json" },
+    { "file": "transactions.csv", "mapping": "transactions.mapping.json" },
+    { "file": "customers_kyc.csv", "mapping": "customers_kyc.mapping.json" }
+  ],
+  "expect": {
+    "entities": {
+      "Customer": 13,
+      "Account": 7,
+      "Device": 3,
+      "Transaction": 8,
+      "Merchant": 4
+    },
+    "relationships_created": 27,
+    "find": [
+      {
+        "entity": { "entity_type": "Customer", "property": "customer_id", "value": "C001" },
+        "properties": { "name": "Alice Tan", "city": "Jakarta" }
+      },
+      {
+        "entity": { "entity_type": "Merchant", "property": "merchant_id", "value": "M004" },
+        "properties": { "name": "CryptoSwap Exchange", "category": "crypto_exchange" }
+      },
+      {
+        "entity": { "entity_type": "Transaction", "property": "transaction_id", "value": "T003" },
+        "properties": { "amount": 1200.0, "currency": "USD" }
+      }
+    ],
+    "neighbors": [
+      {
+        "of": { "entity_type": "Customer", "property": "customer_id", "value": "C001" },
+        "direction": "outgoing",
+        "relationship_type": "OWNS",
+        "count": 2
+      },
+      {
+        "of": { "entity_type": "Device", "property": "device_id", "value": "DEVICE-921" },
+        "direction": "incoming",
+        "relationship_type": "USES",
+        "count": 2
+      },
+      {
+        "of": { "entity_type": "Merchant", "property": "merchant_id", "value": "M004" },
+        "direction": "incoming",
+        "relationship_type": "TO",
+        "count": 3
+      }
+    ],
+    "paths": [
+      {
+        "from": { "entity_type": "Customer", "property": "customer_id", "value": "C001" },
+        "to": { "entity_type": "Customer", "property": "customer_id", "value": "C002" },
+        "hops": 2,
+        "via": ["USES", "USES"]
+      },
+      {
+        "from": { "entity_type": "Customer", "property": "customer_id", "value": "C001" },
+        "to": { "entity_type": "Merchant", "property": "merchant_id", "value": "M004" },
+        "hops": 3,
+        "via": ["OWNS", "SENT", "TO"]
+      }
+    ]
+  },
+  "explore": { "entity_type": "Customer", "property": "customer_id", "value": "C001" },
+  "resolution": {
+    "entity_type": "Customer",
+    "rules": [
+      { "property": "email", "kind": "normalized_email" },
+      { "property": "phone", "kind": "normalized_phone", "country": "ID" },
+      { "property": "name", "kind": "fuzzy_name", "threshold": 0.9 }
+    ],
+    "min_candidates": 7
+  }
+}

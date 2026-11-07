@@ -1,5 +1,8 @@
 name: CI
 
+# Actions are pinned to commit SHAs (version in the comment); update them
+# deliberately. Every job has read-only repository access.
+
 on:
   push:
     branches: [main]
@@ -21,11 +24,11 @@ jobs:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: cargo fmt --check
         run: cargo fmt --all --check
       - name: cargo clippy
@@ -41,12 +44,15 @@ jobs:
     services:
       hugegraph:
         image: hugegraph/hugegraph:1.7.0
+        env:
+          # The same fixed heap as docker-compose.yml.
+          JAVA_OPTS: -Xmx1g
         ports:
           - 18080:8080
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Wait for HugeGraph
         # The server answers with an error page while it is still starting.
         run: curl -fsS --retry 60 --retry-all-errors --retry-delay 3 http://127.0.0.1:18080/versions
@@ -85,9 +91,9 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: MetadataStore contract and PostgreSQL tests (M3 + M4 migrations, fresh database per test)
         run: cargo test -p mindgraph-metadata --test postgres_integration --locked -- --ignored
         env:
@@ -100,8 +106,8 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: npm
@@ -123,9 +129,8 @@ jobs:
       run:
         working-directory: services/ai
     steps:
-      - uses: actions/checkout@v7
-      # setup-uv publishes only full version tags (no floating `v10`).
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           working-directory: services/ai
           enable-cache: true
@@ -137,12 +142,83 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
-  docker:
-    name: Docker Compose (config, build)
+  mcp-release:
+    name: MCP release binary (build, protocol tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - name: Validate docker-compose.yml
-        run: docker compose config --quiet
-      - name: Build images
-        run: docker compose build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build mindgraph-mcp (release)
+        run: cargo build -p mindgraph-mcp --release --locked
+      - name: MCP protocol tests against the release binary (stdio, discovery, schemas, errors, EOF)
+        run: cargo test -p mindgraph-mcp --release --locked --test mcp_protocol
+
+  audit:
+    name: Dependency audit (cargo-deny, npm, pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Rust advisories, licenses, bans and sources (deny.toml)
+        run: cargo deny check
+      - name: Web production dependencies (npm audit)
+        working-directory: apps/web
+        run: npm audit --omit=dev
+      - name: AI service runtime dependencies (pip-audit)
+        working-directory: services/ai
+        run: |
+          uv export --no-dev --no-hashes --no-emit-project --frozen > "$RUNNER_TEMP/ai-requirements.txt"
+          uv tool run --from pip-audit==2.9.0 pip-audit -r "$RUNNER_TEMP/ai-requirements.txt" --no-deps --disable-pip --progress-spinner off
+
+  openapi:
+    name: OpenAPI (valid, matches the router)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: make check-openapi
+
+  full-stack:
+    name: Full stack (Compose, demo, smoke, restart, browser journeys)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install Playwright and Chromium
+        working-directory: apps/web
+        run: npm ci && npx playwright install --with-deps chromium
+      # An isolated Compose project with its own volumes and ports: build,
+      # load the fraud demo through the REST API, smoke-test the published
+      # ports, re-run the loader (idempotent), restart with down + up (data
+      # kept), run the Playwright journeys A-D, then remove only that project.
+      - name: Isolated stack smoke test and browser journeys
+        run: scripts/smoke-stack.sh --e2e
+      - name: Keep the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 7
+
+  release-gate:
+    name: Release gate (all checks passed)
+    runs-on: ubuntu-latest
+    needs: [rust, hugegraph-integration, postgres-integration, web, ai, mcp-release, audit, openapi, full-stack]
+    steps:
+      - run: echo "Every CI job passed."

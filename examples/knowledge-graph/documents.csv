@@ -1,0 +1,8 @@
+document_id,title,doc_type,published_at,author_id
+D-101,Flood forecasting with river gauge time series,paper,2026-03-12T09:00:00Z,P01
+D-101,Flood forecasting with river gauge time series,paper,2026-03-12T09:00:00Z,P05
+D-102,Sensor ingestion design notes,design doc,2026-05-02T09:00:00Z,P04
+D-103,Grid platform quarterly review,report,2026-07-01T09:00:00Z,P03
+D-104,Evaluating OCR on handwritten archives,paper,2025-11-20T09:00:00Z,P01
+D-104,Evaluating OCR on handwritten archives,paper,2025-11-20T09:00:00Z,P04
+D-105,Gauge data quality checklist,guide,2026-08-18T09:00:00Z,P06

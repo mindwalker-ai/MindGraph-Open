@@ -1,0 +1,8 @@
+document_id,topic_id,topic_name
+D-101,T-HYDRO,Hydrology
+D-101,T-TS,Time-series forecasting
+D-102,T-IOT,Sensor networks
+D-102,T-TS,Time-series forecasting
+D-103,T-IOT,Sensor networks
+D-104,T-DOC,Document AI
+D-105,T-HYDRO,Hydrology

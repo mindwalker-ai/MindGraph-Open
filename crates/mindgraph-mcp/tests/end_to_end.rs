@@ -97,7 +97,10 @@ async fn investigate(core: &str, fraud: &Fraud, spy: Option<&WriteSpy>, ask: Ask
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     types.sort_unstable();
-    assert_eq!(types, ["Account", "Customer", "Device"]);
+    assert_eq!(
+        types,
+        ["Account", "Customer", "Device", "Merchant", "Transaction"]
+    );
     let relationship = |name: &str| {
         schema["relationship_types"]
             .as_array()

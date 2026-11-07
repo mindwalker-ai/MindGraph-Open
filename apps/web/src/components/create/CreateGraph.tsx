@@ -3,13 +3,13 @@
 /**
  * "Create a Graph" (mockup 03): a name, the storage, and how to start.
  * CSV and JSON lead to the upload step; "Start Empty" opens the ontology
- * editor without data; the demo arrives with M10.
+ * editor without data; "Explore Demo" opens the demo scenarios (`/demos`)
+ * without creating a graph, because `make demo-<name>` creates its own.
  */
 
 import {
   ArrowRight,
   Braces,
-  ChevronDown,
   Command,
   Lock,
   type LucideIcon,
@@ -22,19 +22,18 @@ import { useRouter } from "next/navigation";
 import { type FormEvent, useMemo, useState } from "react";
 
 import { AppShell } from "@/components/shell/AppShell";
-import { Button, ErrorNote, Field, comingIn } from "@/components/ui/primitives";
+import { Button, ErrorNote, Field } from "@/components/ui/primitives";
 import { type ApiClient, ApiError, createApiClient } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 
-type Start = "csv" | "json" | "empty";
+type Start = "csv" | "json" | "empty" | "demo";
 
 interface Option {
-  id: Start | "demo";
+  id: Start;
   title: string;
   description: string;
   tag: string;
   icon: LucideIcon;
-  milestone?: string;
 }
 
 const OPTIONS: Option[] = [
@@ -65,7 +64,6 @@ const OPTIONS: Option[] = [
     description: "Try MindGraph with sample data.",
     tag: "fraud · knowledge · cyber",
     icon: Play,
-    milestone: "M10",
   },
 ];
 
@@ -84,8 +82,14 @@ export function CreateGraph({ api: injected }: { api?: ApiClient }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const demo = start === "demo";
+
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (demo) {
+      router.push("/demos");
+      return;
+    }
     if (!name.trim() || busy) return;
     setBusy(true);
     setError(null);
@@ -119,22 +123,20 @@ export function CreateGraph({ api: injected }: { api?: ApiClient }) {
               <input
                 autoFocus
                 maxLength={120}
-                placeholder="fraud-investigation"
+                placeholder={demo ? "not needed for a demo" : "fraud-investigation"}
                 value={name}
+                disabled={demo}
                 onChange={(event) => setName(event.target.value)}
-                className="h-9 rounded-[4px] border border-border-strong bg-panel px-3 font-mono text-[12px] font-medium text-text outline-none focus:border-accent"
+                className="h-9 rounded-[4px] border border-border-strong bg-panel px-3 font-mono text-[12px] font-medium text-text outline-none focus:border-accent disabled:text-text-3"
               />
             </Field>
             <div className="flex w-[320px] flex-col gap-1">
               <span className="text-[12px] text-text-3">Storage</span>
-              <span
-                title="v0.1 stores every graph in the bundled HugeGraph"
-                className="flex h-9 items-center gap-2 rounded-[4px] border border-border-strong bg-panel px-3"
-              >
-                <span className="flex-1 font-mono text-[12px] font-medium">
+              <span className="flex h-9 items-center gap-2 rounded-[4px] border border-border bg-panel px-3">
+                <span className="flex-1 truncate font-mono text-[12px] font-medium">
                   Local HugeGraph (bundled)
                 </span>
-                <ChevronDown size={13} className="text-text-3" />
+                <span className="shrink-0 font-mono text-[10px] text-text-3">only option</span>
               </span>
             </div>
           </div>
@@ -147,18 +149,15 @@ export function CreateGraph({ api: injected }: { api?: ApiClient }) {
             {OPTIONS.map((option, index) => {
               const Icon = option.icon;
               const selected = option.id === start;
-              const disabled = Boolean(option.milestone);
               return (
                 <button
                   key={option.id}
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  disabled={disabled}
-                  title={disabled ? comingIn(option.milestone) : undefined}
-                  onClick={() => !disabled && setStart(option.id as Start)}
+                  onClick={() => setStart(option.id)}
                   className={cn(
-                    "flex h-[208px] flex-col gap-[22px] px-[26px] py-8 text-left disabled:cursor-not-allowed",
+                    "flex h-[208px] flex-col gap-[22px] px-[26px] py-8 text-left",
                     selected ? "border-l-2 border-l-accent bg-raised" : "bg-bg hover:bg-panel",
                     index % 2 === 1 && !selected && "sm:border-l sm:border-border",
                     index >= 2 && "border-t border-border",
@@ -171,7 +170,6 @@ export function CreateGraph({ api: injected }: { api?: ApiClient }) {
                         selected
                           ? "bg-accent-soft text-accent"
                           : "border border-border-strong text-text-2",
-                        disabled && "text-text-3",
                       )}
                     >
                       <Icon size={17} />
@@ -187,18 +185,11 @@ export function CreateGraph({ api: injected }: { api?: ApiClient }) {
                     />
                   </span>
                   <span className="flex flex-col gap-[3px]">
-                    <span
-                      className={cn(
-                        "text-[17px] font-bold",
-                        disabled ? "text-text-3" : "text-text",
-                      )}
-                    >
-                      {option.title}
-                    </span>
+                    <span className="text-[17px] font-bold text-text">{option.title}</span>
                     <span className="text-[13.5px] text-text-2">{option.description}</span>
                   </span>
                   <span className="font-mono text-[10.5px] font-medium text-text-3">
-                    {disabled ? comingIn(option.milestone) : option.tag}
+                    {option.tag}
                   </span>
                 </button>
               );
@@ -223,10 +214,10 @@ export function CreateGraph({ api: injected }: { api?: ApiClient }) {
             <Button
               type="submit"
               variant="primary"
-              disabled={!name.trim() || busy}
+              disabled={(!demo && !name.trim()) || busy}
               icon={<ArrowRight size={14} />}
             >
-              {busy ? "Creating…" : "Continue"}
+              {busy ? "Creating…" : demo ? "See demo scenarios" : "Continue"}
             </Button>
           </footer>
         </form>
