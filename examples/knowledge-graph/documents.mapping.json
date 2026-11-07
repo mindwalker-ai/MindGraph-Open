@@ -1,0 +1,55 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "document",
+        "entity_type": "Document",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "document_id",
+            "property": "document_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "document_id",
+            "property": "document_id"
+          },
+          {
+            "source_field": "title",
+            "property": "title"
+          },
+          {
+            "source_field": "doc_type",
+            "property": "doc_type"
+          },
+          {
+            "source_field": "published_at",
+            "property": "published_at"
+          }
+        ]
+      },
+      {
+        "alias": "author",
+        "entity_type": "Person",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "author_id",
+            "property": "person_id"
+          }
+        ],
+        "properties": []
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "AUTHORED",
+        "source": "author",
+        "target": "document",
+        "properties": []
+      }
+    ]
+  }
+}

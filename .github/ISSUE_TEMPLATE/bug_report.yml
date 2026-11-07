@@ -1,0 +1,65 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Security problems go through SECURITY.md, not here.**
+        Never paste API keys, `.env` contents or real personal data.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: "`mindgraph --version`, the release tag or `git rev-parse --short HEAD`."
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: How do you run MindGraph?
+      options:
+        - Docker Compose
+        - Podman (podman compose)
+        - Natively (cargo / npm / uv)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - Web app (upload, builder, explorer, resolution)
+        - Core REST API
+        - Dataset ingestion
+        - AI Graph Builder / Ask MindGraph
+        - Entity resolution
+        - MCP server
+        - Demo loader (make demo-*)
+        - Docker / installation
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Ideally with one of the bundled demos or a small synthetic file.
+      placeholder: |
+        1. make demo-fraud
+        2. Open the Explorer and …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Error messages, the `request_id` from an API error, or `docker compose logs core` lines. Remove anything sensitive.
+      render: text

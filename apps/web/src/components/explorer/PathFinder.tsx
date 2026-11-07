@@ -8,7 +8,7 @@
  */
 
 import { ArrowLeft, ArrowRight, Crosshair, LoaderCircle, Route, X } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 
 import { Button, ErrorNote, Kicker, inputClass } from "@/components/ui/primitives";
 import { DIRECTIONS, type Direction, type Entity, EXPLORER_LIMITS } from "@/lib/api/types";
@@ -72,9 +72,10 @@ function EndpointField({
   const [busy, setBusy] = useState(false);
   const title = endpoint === "source" ? "Source" : "Target";
 
-  const lookup = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!id.trim()) return;
+  // Not a <form>: this field sits inside the path finder's own form, and a
+  // nested form would submit natively and reload the page.
+  const lookup = async () => {
+    if (!id.trim() || busy) return;
     setBusy(true);
     const failure = await onLookup(id.trim());
     setBusy(false);
@@ -135,18 +136,24 @@ function EndpointField({
               </option>
             ))}
           </select>
-          <form onSubmit={lookup} className="flex gap-1.5">
+          <div className="flex gap-1.5">
             <input
               aria-label={`${title} entity ID`}
               placeholder="or paste an entity ID"
               className={inputClass}
               value={id}
               onChange={(e) => setId(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter uses the ID instead of submitting the path search.
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                void lookup();
+              }}
             />
-            <Button type="submit" size="md" disabled={busy || !id.trim()}>
+            <Button size="md" disabled={busy || !id.trim()} onClick={() => void lookup()}>
               Use
             </Button>
-          </form>
+          </div>
           {error && <p className="text-[11.5px] text-danger">{error}</p>}
         </>
       )}

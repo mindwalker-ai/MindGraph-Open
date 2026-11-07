@@ -141,4 +141,4 @@ uv run uvicorn mindgraph_ai.main:app --port 8000
 curl -s localhost:8000/ready
 ```
 
-Then request a suggestion through MindGraph Core (see the root README).
+Then request a suggestion through MindGraph Core (see [docs/tutorials/ai-graph-builder.md](../../docs/tutorials/ai-graph-builder.md)).

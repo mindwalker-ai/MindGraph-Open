@@ -1,0 +1,79 @@
+{
+  "entity_types": [
+    {
+      "name": "User",
+      "display_name": "User",
+      "properties": [
+        { "name": "user_id", "type": "string", "required": true },
+        { "name": "display_name", "type": "string", "required": false },
+        { "name": "department", "type": "string", "required": false }
+      ]
+    },
+    {
+      "name": "Endpoint",
+      "display_name": "Endpoint",
+      "properties": [
+        { "name": "endpoint_id", "type": "string", "required": true },
+        { "name": "hostname", "type": "string", "required": false },
+        { "name": "os", "type": "string", "required": false }
+      ]
+    },
+    {
+      "name": "Process",
+      "display_name": "Process",
+      "properties": [
+        { "name": "process_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true },
+        { "name": "executable_path", "type": "string", "required": false },
+        { "name": "started_at", "type": "datetime", "required": false }
+      ]
+    },
+    {
+      "name": "IPAddress",
+      "display_name": "IP Address",
+      "properties": [{ "name": "address", "type": "string", "required": true }]
+    },
+    {
+      "name": "Domain",
+      "display_name": "Domain",
+      "properties": [{ "name": "domain", "type": "string", "required": true }]
+    }
+  ],
+  "relationship_types": [
+    {
+      "name": "LOGGED_INTO",
+      "source_entity_type": "User",
+      "target_entity_type": "Endpoint",
+      "properties": [
+        { "name": "logon_type", "type": "string", "required": false },
+        { "name": "logged_in_at", "type": "datetime", "required": false }
+      ]
+    },
+    {
+      "name": "EXECUTED",
+      "source_entity_type": "Endpoint",
+      "target_entity_type": "Process",
+      "properties": []
+    },
+    {
+      "name": "CONNECTED_TO",
+      "source_entity_type": "Process",
+      "target_entity_type": "IPAddress",
+      "properties": [
+        { "name": "port", "type": "integer", "required": false },
+        { "name": "protocol", "type": "string", "required": false },
+        { "name": "bytes_sent", "type": "integer", "required": false },
+        { "name": "connected_at", "type": "datetime", "required": false }
+      ]
+    },
+    {
+      "name": "RESOLVED_TO",
+      "source_entity_type": "Domain",
+      "target_entity_type": "IPAddress",
+      "properties": [
+        { "name": "record_type", "type": "string", "required": false },
+        { "name": "resolved_at", "type": "datetime", "required": false }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+user_id,display_name,department,endpoint_id,hostname,os,logon_type,logged_in_at
+j.santoso,Joko Santoso,Finance,WS-FIN-07,ws-fin-07.corp.example,windows,interactive,2026-10-02T08:05:00Z
+a.pratama,Agus Pratama,Finance,WS-FIN-12,ws-fin-12.corp.example,windows,interactive,2026-10-02T08:20:00Z
+r.wijaya,Rina Wijaya,IT,WS-IT-03,ws-it-03.corp.example,macos,interactive,2026-10-02T07:55:00Z
+r.wijaya,Rina Wijaya,IT,WS-FIN-07,ws-fin-07.corp.example,windows,remote,2026-10-02T13:40:00Z
+svc-backup,Backup service account,IT,SRV-FILE-01,srv-file-01.corp.example,linux,service,2026-10-02T02:00:00Z
+j.santoso,Joko Santoso,Finance,SRV-FILE-01,srv-file-01.corp.example,linux,network,2026-10-02T09:10:00Z

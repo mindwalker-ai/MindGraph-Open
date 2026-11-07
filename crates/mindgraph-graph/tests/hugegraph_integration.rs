@@ -72,6 +72,28 @@ graph_store_contract!([ignore = "requires HugeGraph 1.7; see module docs"] hugeg
 
 #[tokio::test]
 #[ignore = "requires HugeGraph 1.7; see module docs"]
+async fn ping_answers_once_the_schema_exists() {
+    let store = ready_store().await;
+    store.ping().await.unwrap();
+}
+
+/// Offline: nothing listens on port 1, so the readiness probe must fail
+/// (quickly) instead of reporting a usable store.
+#[tokio::test]
+async fn ping_reports_an_unreachable_server() {
+    let config = HugeGraphConfig::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_request_timeout(Duration::from_secs(2))
+        .unwrap();
+    let store = HugeGraphStore::new(config).unwrap();
+    assert!(matches!(
+        store.ping().await,
+        Err(GraphStoreError::BackendUnavailable { .. })
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires HugeGraph 1.7; see module docs"]
 async fn schema_bootstrap_is_idempotent() {
     let store = ready_store().await;
     store.ensure_schema().await.unwrap();

@@ -1,0 +1,51 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "transaction",
+        "entity_type": "Transaction",
+        "mode": "create_or_match",
+        "identity": [{ "source_field": "transaction_id", "property": "transaction_id" }],
+        "properties": [
+          { "source_field": "transaction_id", "property": "transaction_id" },
+          { "source_field": "amount", "property": "amount" },
+          { "source_field": "currency", "property": "currency" },
+          { "source_field": "channel", "property": "channel" },
+          { "source_field": "occurred_at", "property": "occurred_at" }
+        ]
+      },
+      {
+        "alias": "account",
+        "entity_type": "Account",
+        "mode": "match_only",
+        "identity": [{ "source_field": "account_id", "property": "account_id" }],
+        "properties": []
+      },
+      {
+        "alias": "merchant",
+        "entity_type": "Merchant",
+        "mode": "create_or_match",
+        "identity": [{ "source_field": "merchant_id", "property": "merchant_id" }],
+        "properties": [
+          { "source_field": "merchant_id", "property": "merchant_id" },
+          { "source_field": "merchant_name", "property": "name" },
+          { "source_field": "merchant_category", "property": "category" }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "SENT",
+        "source": "account",
+        "target": "transaction",
+        "properties": []
+      },
+      {
+        "relationship_type": "TO",
+        "source": "transaction",
+        "target": "merchant",
+        "properties": []
+      }
+    ]
+  }
+}

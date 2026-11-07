@@ -379,8 +379,11 @@ describe("GraphExplorer", () => {
     explore(client);
     await screen.findByRole("heading", { name: "Alice Tan" });
     fireEvent.click(within(details()).getByRole("button", { name: /Find Path/ }));
-    fireEvent.change(screen.getByLabelText("Target entity ID"), { target: { value: budi.id } });
-    fireEvent.click(screen.getByRole("button", { name: "Use" }));
+    // A nested <form> would submit natively in a real browser and reload the page.
+    expect(document.querySelector("form form")).toBeNull();
+    const target = screen.getByLabelText("Target entity ID");
+    fireEvent.change(target, { target: { value: budi.id } });
+    fireEvent.keyDown(target, { key: "Enter" });
     await waitFor(() => expect(client.getEntity).toHaveBeenCalledWith("g1", budi.id));
     fireEvent.click(await screen.findByRole("button", { name: /Find shortest path/ }));
 

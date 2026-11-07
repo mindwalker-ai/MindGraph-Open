@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CreateGraph } from "@/components/create/CreateGraph";
+import { DemoScenarios } from "@/components/demos/DemoScenarios";
 import { HomeScreen } from "@/components/home/HomeScreen";
 import { UploadData } from "@/components/upload/UploadData";
 import type { ApiClient } from "@/lib/api/client";
@@ -65,7 +66,8 @@ describe("HomeScreen", () => {
     expect(screen.getByRole("link", { name: /Create Graph/ }).getAttribute("href")).toBe(
       "/graphs/new",
     );
-    expect(screen.getByText("Explore Demo").closest("[aria-disabled]")).not.toBeNull();
+    expect(screen.getByRole("link", { name: /Explore Demo/ }).getAttribute("href")).toBe("/demos");
+    expect(document.querySelector("[aria-disabled]")).toBeNull();
   });
 
   it("opens draft graphs on the upload step", async () => {
@@ -80,7 +82,7 @@ describe("HomeScreen", () => {
     expect(within(graphs).queryByRole("link", { name: /Explore Graph/ })).toBeNull();
   });
 
-  it("lists graphs with their ontology and keeps later features disabled", async () => {
+  it("lists graphs with their ontology and links to the demo scenarios", async () => {
     render(<HomeScreen api={api()} />);
     const graphs = await screen.findByRole("region", { name: "Graphs" });
     // An active graph opens in the Graph Explorer, with a way to add more data.
@@ -98,9 +100,17 @@ describe("HomeScreen", () => {
     ).toBe("/graphs/g1/upload");
     expect(await within(graphs).findByRole("img", { name: /1 entity types/ })).toBeDefined();
     expect(within(graphs).getByText(/ontology v2/)).toBeDefined();
-    for (const button of screen.getAllByRole("button", { name: /Use template/ })) {
-      expect((button as HTMLButtonElement).disabled).toBe(true);
-    }
+    // Counts come from the ontology; nothing is a placeholder.
+    expect(within(graphs).getByText("entity types").previousElementSibling?.textContent).toBe("1");
+    expect(within(graphs).queryByText("—")).toBeNull();
+    // No demo is loaded here, so each one links to how to load it.
+    expect(
+      screen.getByRole("link", { name: "Load the Fraud Investigation demo" }).getAttribute("href"),
+    ).toBe("/demos#fraud");
+    expect(
+      screen.getByRole("link", { name: "Load the Cyber Investigation demo" }).getAttribute("href"),
+    ).toBe("/demos#cyber");
+    expect(screen.queryByText(/Coming (soon|in)/)).toBeNull();
     expect(screen.getByRole("link", { name: /Set up MCP/ }).getAttribute("href")).toBe(
       "/graphs/g1/integrations/mcp",
     );
@@ -118,9 +128,6 @@ describe("CreateGraph", () => {
     );
     fireEvent.change(name, { target: { value: "  Fraud Investigation " } });
     fireEvent.click(screen.getByRole("radio", { name: /Upload JSON/ }));
-    expect(
-      (screen.getByRole("radio", { name: /Explore Demo/ }) as HTMLButtonElement).disabled,
-    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/graphs/g1/upload?kind=json"));
     expect(client.createGraph).toHaveBeenCalledWith("Fraud Investigation");
@@ -134,6 +141,76 @@ describe("CreateGraph", () => {
     fireEvent.click(screen.getByRole("radio", { name: /Start Empty/ }));
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/graphs/g1/builder"));
+  });
+
+  it("sends the demo option to the demo scenarios without creating a graph", async () => {
+    const client = api();
+    render(<CreateGraph api={client} />);
+    fireEvent.click(screen.getByRole("radio", { name: /Explore Demo/ }));
+    const name = screen.getByRole("textbox", { name: "Graph name" }) as HTMLInputElement;
+    expect(name.disabled).toBe(true);
+    const go = screen.getByRole("button", { name: /See demo scenarios/ }) as HTMLButtonElement;
+    expect(go.disabled).toBe(false);
+    fireEvent.click(go);
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/demos"));
+    expect(client.createGraph).not.toHaveBeenCalled();
+  });
+});
+
+describe("DemoScenarios", () => {
+  const FRAUD_DEMO: GraphProject = {
+    ...GRAPH,
+    id: "fraud-graph",
+    name: "Demo: Fraud investigation",
+  };
+
+  it("links a loaded demo to its focus entity and shows how to load the others", async () => {
+    const searchEntities = vi.fn().mockResolvedValue({
+      data: [{ id: "alice", entity_type: "Customer", properties: {} }],
+      count: 1,
+      limit: 1,
+    });
+    render(
+      <DemoScenarios
+        api={api({
+          listGraphs: vi.fn().mockResolvedValue([GRAPH, FRAUD_DEMO]),
+          searchEntities,
+        })}
+      />,
+    );
+    const fraud = await screen.findByRole("region", { name: "Fraud Investigation status" });
+    await waitFor(() =>
+      expect(
+        within(fraud)
+          .getByRole("link", { name: /Open in Explorer/ })
+          .getAttribute("href"),
+      ).toBe("/graphs/fraud-graph/explore?entity=alice"),
+    );
+    expect(searchEntities).toHaveBeenCalledWith("fraud-graph", {
+      entity_type: "Customer",
+      property_filters: { customer_id: "C001" },
+      limit: 1,
+    });
+    expect(
+      within(fraud)
+        .getByRole("link", { name: /Review possible duplicates/ })
+        .getAttribute("href"),
+    ).toBe("/graphs/fraud-graph/resolution");
+    // A user graph that only looks similar is not mistaken for a demo.
+    const cyber = screen.getByRole("region", { name: "Cyber Investigation status" });
+    expect(within(cyber).getByText("Not loaded")).toBeDefined();
+    expect(within(cyber).getByText("make demo-cyber")).toBeDefined();
+    expect(within(cyber).queryByRole("link")).toBeNull();
+    const knowledge = screen.getByRole("region", { name: "Company Knowledge Graph status" });
+    expect(within(knowledge).getByText("make demo-knowledge")).toBeDefined();
+  });
+
+  it("still shows the commands when Core cannot be reached", async () => {
+    render(
+      <DemoScenarios api={api({ listGraphs: vi.fn().mockRejectedValue(new Error("down")) })} />,
+    );
+    expect((await screen.findByRole("alert")).textContent).toMatch(/cannot be reached/);
+    expect(screen.getByText("make demo-fraud")).toBeDefined();
   });
 });
 

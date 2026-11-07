@@ -1,0 +1,42 @@
+name: MCP and CLI binaries (manual)
+
+# Builds `mindgraph-mcp` and the `mindgraph` CLI for Linux x86_64 and macOS
+# arm64 and keeps them as workflow artifacts with SHA-256 checksums. Runs only
+# when started by hand. It does not create a GitHub release or push a tag.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Build release binaries
+        run: cargo build --release --locked -p mindgraph-mcp -p mindgraph-cli
+      - name: Protocol tests against the release MCP binary
+        run: cargo test -p mindgraph-mcp --release --locked --test mcp_protocol
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/release/mindgraph-mcp target/release/mindgraph dist/
+          ./dist/mindgraph --version
+          ./dist/mindgraph-mcp --help > /dev/null
+          cd dist && shasum -a 256 mindgraph-mcp mindgraph > SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mindgraph-${{ matrix.target }}
+          path: dist/
+          retention-days: 14

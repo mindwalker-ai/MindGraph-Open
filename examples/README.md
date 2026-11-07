@@ -1,26 +1,39 @@
 # Examples
 
-Demo datasets and walkthroughs, delivered in M10:
+Three synthetic demo scenarios. Each folder holds CSV files, an
+`ontology.json`, one `*.mapping.json` per file (the M4 mapping format) and a
+`demo.json` manifest that the demo loader reads.
 
-| Directory | Scenario | Entities |
-|---|---|---|
-| [`fraud/`](fraud/) | Fraud investigation (launch hero demo) | Customer, Account, Transaction, Merchant, Device, IP Address |
-| [`knowledge-graph/`](knowledge-graph/) | Company knowledge graph | Person, Company, Topic, Document, Project |
-| [`cyber/`](cyber/) | Cyber investigation | User, Endpoint, IP, Domain, Process, Malware |
+| Scenario | Load it | Entity types | Walkthrough |
+|---|---|---|---|
+| Fraud investigation | `make demo-fraud` | Customer, Account, Device, Transaction, Merchant | [fraud/README.md](fraud/README.md) |
+| Cyber investigation | `make demo-cyber` | User, Endpoint, Process, IPAddress, Domain | [cyber/README.md](cyber/README.md) |
+| Company knowledge graph | `make demo-knowledge` | Person, Company, Project, Document, Topic | [knowledge-graph/README.md](knowledge-graph/README.md) |
 
-`fraud/` already holds a deliberately tiny dataset for verifying
-deterministic ingestion by hand (see the README quick start):
+`make demo-*` starts the Docker Compose stack if needed and runs the
+one-shot `demo` service (`mindgraph demo <scenario>`). The loader:
 
-- `customers.csv`, `accounts.csv`, `devices.csv`, `ontology.json` and one
-  mapping per file (M4).
-- `customers_kyc.csv` with `customers_kyc.mapping.json` (M9). It is a second
-  customer source with deliberate near-duplicates for
-  [entity resolution](../docs/entity-resolution/README.md):
-  - name variants and letter-case differences;
-  - local and international phone formats;
-  - a common name that belongs to a different person;
-  - an invalid phone number.
+- uses only Core's public REST API (create graph, ontology, upload, analyse,
+  ingest), exactly like a user;
+- verifies entity counts, relationships, exact searches, neighbours and
+  shortest paths, and prints the Graph ID and an Explorer link;
+- waits with bounded timeouts and exits non-zero with the API error when a
+  step fails;
+- reuses the graph with the demo's exact name when it exists (verifying it
+  instead of loading again), and creates a timestamped copy only with
+  `--new`. It never changes other graphs or deletes data.
 
-All values are synthetic. The full launch demo dataset arrives in M10.
+```bash
+docker compose --profile demo run --rm demo --list          # scenarios
+docker compose --profile demo run --rm demo fraud --new     # a fresh copy
+cargo run -p mindgraph-cli -- demo cyber --api http://127.0.0.1:8080   # without Docker
+```
 
-Examples are proposed to be licensed Apache-2.0 (ADR-015, pending legal approval).
+`fraud/` also keeps the original M4 walkthrough files (customers, accounts,
+devices) used by the README's "load a dataset without AI" steps and the test
+suites, and `customers_kyc.csv` for entity resolution.
+
+All values are synthetic. Domains and IP addresses in `cyber/` come from the
+reserved documentation ranges (RFC 2606, RFC 5737). The examples are proposed
+to be licensed Apache-2.0 (ADR-015); that split is pending legal approval
+(see [docs/legal/LICENSE_AUDIT.md](../docs/legal/LICENSE_AUDIT.md)).

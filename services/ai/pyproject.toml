@@ -1,6 +1,6 @@
 [project]
 name = "mindgraph-ai"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "MindGraph Open AI service: LLM integration, ontology suggestion and GraphRAG synthesis."
 readme = "README.md"
 requires-python = ">=3.12"

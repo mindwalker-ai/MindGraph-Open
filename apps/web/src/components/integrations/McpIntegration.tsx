@@ -11,7 +11,7 @@
  * and whether Core has a model for the opt-in `ask_graph` tool.
  */
 
-import { Check, Copy, FileCode2, Lock, RefreshCw, Sparkles, Terminal } from "lucide-react";
+import { FileCode2, Lock, RefreshCw, Sparkles, Terminal } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -22,6 +22,7 @@ import {
 } from "react";
 
 import { AppShell } from "@/components/shell/AppShell";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { Badge, Button, Field, Kicker, inputClass } from "@/components/ui/primitives";
 import { type ApiClient, ApiError, createApiClient } from "@/lib/api/client";
 import type { GraphBuilderStatus, GraphProject } from "@/lib/api/types";
@@ -67,25 +68,6 @@ function useSavedSetting(key: string): string | null {
     () => () => {},
     () => readSetting(key) || null,
     () => null,
-  );
-}
-
-function CopyButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 1500);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-  return (
-    <Button
-      size="sm"
-      aria-label={label}
-      icon={copied ? <Check size={12} /> : <Copy size={12} />}
-      onClick={() => void navigator.clipboard?.writeText(text).then(() => setCopied(true))}
-    >
-      {copied ? "Copied" : "Copy"}
-    </Button>
   );
 }
 

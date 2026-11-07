@@ -69,13 +69,6 @@ pub(crate) struct EdgePage {
     pub(crate) page: Option<String>,
 }
 
-/// `GET traversers/shortestpath`: the vertex ids of the path, or `[]`.
-#[derive(Debug, Deserialize)]
-pub(crate) struct PathResponse {
-    #[serde(default)]
-    pub(crate) path: Vec<Value>,
-}
-
 /// HugeGraph's error body: `{"exception": "...", "message": "...", ...}`.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ErrorBody {

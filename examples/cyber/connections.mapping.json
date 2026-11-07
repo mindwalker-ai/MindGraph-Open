@@ -1,0 +1,60 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "process",
+        "entity_type": "Process",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "process_id",
+            "property": "process_id"
+          }
+        ],
+        "properties": []
+      },
+      {
+        "alias": "ip",
+        "entity_type": "IPAddress",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "ip_address",
+            "property": "address"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "ip_address",
+            "property": "address"
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "CONNECTED_TO",
+        "source": "process",
+        "target": "ip",
+        "properties": [
+          {
+            "source_field": "port",
+            "property": "port"
+          },
+          {
+            "source_field": "protocol",
+            "property": "protocol"
+          },
+          {
+            "source_field": "bytes_sent",
+            "property": "bytes_sent"
+          },
+          {
+            "source_field": "connected_at",
+            "property": "connected_at"
+          }
+        ]
+      }
+    ]
+  }
+}

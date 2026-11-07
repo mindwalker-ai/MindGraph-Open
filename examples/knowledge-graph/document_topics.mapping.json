@@ -1,0 +1,47 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "document",
+        "entity_type": "Document",
+        "mode": "match_only",
+        "identity": [
+          {
+            "source_field": "document_id",
+            "property": "document_id"
+          }
+        ],
+        "properties": []
+      },
+      {
+        "alias": "topic",
+        "entity_type": "Topic",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "topic_id",
+            "property": "topic_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "topic_id",
+            "property": "topic_id"
+          },
+          {
+            "source_field": "topic_name",
+            "property": "name"
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "ABOUT",
+        "source": "document",
+        "target": "topic",
+        "properties": []
+      }
+    ]
+  }
+}

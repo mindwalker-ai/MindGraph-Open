@@ -271,8 +271,9 @@ so you can find the matching line in Core's log.
     acceptable for the source package.
   - **CLI:** the AGPL `mindgraph` CLI links `mindgraph-mcp` for its
     `mindgraph mcp` command.
-  - **Packaging:** per-package license files and source headers are not in
-    place yet (planned for M10).
+  - **Packaging:** per-package license files and source headers wait for
+    legal approval of the split (see
+    [LICENSE_AUDIT.md](../legal/LICENSE_AUDIT.md)).
 
 ## Tests
 

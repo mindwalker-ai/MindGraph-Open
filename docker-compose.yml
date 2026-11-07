@@ -5,6 +5,10 @@
 # Only `web` and `core` publish ports, and only on 127.0.0.1. `postgres`,
 # `hugegraph` and `ai` stay on the internal Docker network. Every setting
 # has a local default; override it in a `.env` file (see .env.example).
+#
+# Data lives in named volumes and survives `docker compose down` and restarts.
+# `docker compose down -v` DELETES every graph, dataset and decision; see
+# docs/operations/backup-restore.md before using it.
 
 name: mindgraph
 
@@ -73,13 +77,41 @@ services:
         condition: service_healthy
       hugegraph:
         condition: service_healthy
+    # Readiness, not liveness: /ready answers 200 only while PostgreSQL and
+    # HugeGraph both answer, so `web` and `demo` start against a usable core.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/ready"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 20s
     restart: unless-stopped
+
+  # One-shot demo loader: `make demo-fraud`, `make demo-cyber`,
+  # `make demo-knowledge`. It belongs to the `demo` profile, so
+  # `docker compose up` never starts it. It loads examples/<scenario> through
+  # core's public REST API only (no database access), reuses and verifies an
+  # existing demo graph instead of loading it twice, and never deletes data.
+  #
+  #   docker compose --profile demo run --rm demo fraud
+  demo:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
+    entrypoint: ["mindgraph", "demo"]
+    command: ["--help"]
+    environment:
+      MINDGRAPH_API_URL: http://core:8080
+      MINDGRAPH_EXAMPLES_DIR: /examples
+      # Printed links point at the web app published on the host.
+      MINDGRAPH_WEB_URL: http://localhost:${MINDGRAPH_WEB_PORT:-3000}
+    volumes:
+      - ./examples:/examples:ro
+    depends_on:
+      core:
+        condition: service_healthy
+    restart: "no"
 
   ai:
     build:
@@ -132,9 +164,14 @@ services:
 
   hugegraph:
     image: hugegraph/hugegraph:1.7.0
+    environment:
+      # A fixed heap instead of the image's default (half of the memory that
+      # happens to be free at start), so memory use is predictable.
+      JAVA_OPTS: -Xmx${MINDGRAPH_HUGEGRAPH_HEAP:-1g}
     # The image declares /hugegraph-server as its volume. It holds both the
-    # RocksDB data and the "already initialised" marker. After changing the
-    # image version, recreate it with `docker compose down -v`.
+    # RocksDB data and the "already initialised" marker. Changing the image
+    # version needs a fresh volume, which deletes the graph data: back it up
+    # first (docs/operations/backup-restore.md).
     volumes:
       - hugegraph-data:/hugegraph-server
     healthcheck:

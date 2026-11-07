@@ -1,0 +1,69 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "person",
+        "entity_type": "Person",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "person_id",
+            "property": "person_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "person_id",
+            "property": "person_id"
+          },
+          {
+            "source_field": "name",
+            "property": "name"
+          },
+          {
+            "source_field": "role",
+            "property": "role"
+          }
+        ]
+      },
+      {
+        "alias": "company",
+        "entity_type": "Company",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "company_id",
+            "property": "company_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "company_id",
+            "property": "company_id"
+          },
+          {
+            "source_field": "company_name",
+            "property": "name"
+          },
+          {
+            "source_field": "industry",
+            "property": "industry"
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "WORKS_AT",
+        "source": "person",
+        "target": "company",
+        "properties": [
+          {
+            "source_field": "since",
+            "property": "since"
+          }
+        ]
+      }
+    ]
+  }
+}

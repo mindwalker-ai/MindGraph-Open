@@ -1,0 +1,10 @@
+person_id,project_id,project_name,status,contribution_role
+P01,PRJ-FLOOD,Flood Early Warning,active,lead
+P02,PRJ-FLOOD,Flood Early Warning,active,contributor
+P05,PRJ-FLOOD,Flood Early Warning,active,domain expert
+P06,PRJ-FLOOD,Flood Early Warning,active,contributor
+P03,PRJ-GRID,Grid Sensor Platform,active,lead
+P04,PRJ-GRID,Grid Sensor Platform,active,contributor
+P02,PRJ-GRID,Grid Sensor Platform,active,contributor
+P01,PRJ-OCR,Archive Digitisation,completed,advisor
+P04,PRJ-OCR,Archive Digitisation,completed,contributor

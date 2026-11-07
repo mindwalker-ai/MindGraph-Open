@@ -97,6 +97,15 @@ impl GraphExplorerService {
         }
     }
 
+    /// Checks that the graph store is reachable (Core's readiness probe).
+    ///
+    /// # Errors
+    ///
+    /// [`ApplicationError::Unavailable`] when it is not.
+    pub async fn check_ready(&self) -> Result<(), ApplicationError> {
+        self.graph.ping().await.map_err(graph_failure)
+    }
+
     /// The GraphStore, for other read-only use cases (GraphRAG).
     pub(crate) fn graph_store(&self) -> &dyn GraphStore {
         self.graph.as_ref()

@@ -153,8 +153,13 @@ to the nanosecond). Unreadable stored data surfaces as
 - List and traverser responses are always gzip-compressed.
 - Writing an element with an existing id overwrites it, so the adapter looks
   ids up before every write.
-- `traversers/edgeexist` returns nothing when `label` is passed for an edge
-  label with sort keys, so the adapter filters the label itself.
+- Path search does not use HugeGraph's `traversers/shortestpath`: that
+  traverser allocates fixed-size records for every BFS level and threw
+  `OutOfMemoryError` on a 35-entity graph even with a 2 GiB heap (M10),
+  after which the server refused other requests. The adapter runs the same
+  breadth-first search as the memory store instead: one `graph/edges`
+  request per expanded entity, relationships in id order, first discovery
+  wins, at most 2,000 expanded entities per search (`InvalidInput` beyond).
 
 ### Live integration tests
 
@@ -186,8 +191,10 @@ CI runs the same suite in the `hugegraph-integration` job. Plain
 - `clear_graph` deletes vertices one request at a time, and `get_subgraph`
   reads the edges of each requested entity separately. The REST API offers
   no batch delete or multi-vertex edge read.
-- Path search does not filter by relationship type. When several different
-  shortest paths exist, the backends may pick different ones.
+- Path search does not filter by relationship type. Both backends run the
+  same breadth-first search, so they return the same shortest path. On
+  HugeGraph it reads the relationships of each expanded entity separately
+  and stops after 2,000 entities.
 - HTTPS to HugeGraph is not enabled. It is an internal backend.
 
 ## Metadata (ADR-005, M3)

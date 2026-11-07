@@ -1,0 +1,71 @@
+{
+  "title": "Company knowledge graph",
+  "summary": "people, companies, projects, documents and topics across three fictional organisations",
+  "graph": {
+    "name": "Demo: Company knowledge graph",
+    "description": "Synthetic knowledge graph demo loaded by `make demo-knowledge`. All people, companies and documents are fictional."
+  },
+  "ontology": "ontology.json",
+  "sources": [
+    { "file": "people.csv", "mapping": "people.mapping.json" },
+    { "file": "contributions.csv", "mapping": "contributions.mapping.json" },
+    { "file": "documents.csv", "mapping": "documents.mapping.json" },
+    { "file": "document_topics.csv", "mapping": "document_topics.mapping.json" },
+    { "file": "project_references.csv", "mapping": "project_references.mapping.json" }
+  ],
+  "expect": {
+    "entities": {
+      "Person": 6,
+      "Company": 3,
+      "Project": 3,
+      "Document": 5,
+      "Topic": 4
+    },
+    "relationships_created": 34,
+    "find": [
+      {
+        "entity": { "entity_type": "Company", "property": "company_id", "value": "CO-TRT" },
+        "properties": { "name": "Tirta Data" }
+      },
+      {
+        "entity": { "entity_type": "Document", "property": "document_id", "value": "D-101" },
+        "properties": { "title": "Flood forecasting with river gauge time series" }
+      }
+    ],
+    "neighbors": [
+      {
+        "of": { "entity_type": "Project", "property": "project_id", "value": "PRJ-FLOOD" },
+        "direction": "incoming",
+        "relationship_type": "CONTRIBUTES_TO",
+        "count": 4
+      },
+      {
+        "of": { "entity_type": "Document", "property": "document_id", "value": "D-101" },
+        "direction": "incoming",
+        "relationship_type": "AUTHORED",
+        "count": 2
+      },
+      {
+        "of": { "entity_type": "Topic", "property": "topic_id", "value": "T-TS" },
+        "direction": "incoming",
+        "relationship_type": "ABOUT",
+        "count": 2
+      }
+    ],
+    "paths": [
+      {
+        "from": { "entity_type": "Person", "property": "person_id", "value": "P06" },
+        "to": { "entity_type": "Person", "property": "person_id", "value": "P01" },
+        "hops": 2,
+        "via": ["CONTRIBUTES_TO", "CONTRIBUTES_TO"]
+      },
+      {
+        "from": { "entity_type": "Document", "property": "document_id", "value": "D-105" },
+        "to": { "entity_type": "Company", "property": "company_id", "value": "CO-ARN" },
+        "hops": 3,
+        "via": ["REFERENCES", "CONTRIBUTES_TO", "WORKS_AT"]
+      }
+    ]
+  },
+  "explore": { "entity_type": "Project", "property": "project_id", "value": "PRJ-FLOOD" }
+}

@@ -23,7 +23,7 @@ pub use config::HugeGraphConfig;
 
 use self::client::{Client, Failure};
 use self::codec::{EDGE_LABEL, PROP_GRAPH_ID, PROP_ID, PROP_TYPE, VERTEX_LABEL};
-use self::dto::{EdgePage, PathResponse, Vertex, VertexPage};
+use self::dto::{EdgePage, Vertex, VertexPage};
 use crate::validate;
 use crate::{
     Direction, EntitySearch, GraphPath, GraphStore, GraphStoreError, NeighborQuery, PathQuery,
@@ -38,8 +38,10 @@ const ID_LOOKUP_CHUNK: usize = 50;
 const PAGE_SIZE: usize = 500;
 /// Upper bound on candidates scanned by one search or adjacency read.
 const MAX_SCAN: usize = 100_000;
-/// Upper bound on parallel relationships read between two entities.
-const MAX_PARALLEL_EDGES: usize = 10_000;
+/// Most entities whose relationships one path search reads (one request
+/// each); beyond it the search stops with `InvalidInput` instead of running
+/// for minutes.
+const MAX_PATH_EXPANSIONS: usize = 2_000;
 
 /// A [`GraphStore`] backed by Apache HugeGraph 1.7.
 ///
@@ -207,36 +209,6 @@ impl HugeGraphStore {
         }
     }
 
-    /// The relationships from `from` to `to`.
-    async fn edges_between(
-        &self,
-        graph_id: GraphId,
-        from: EntityId,
-        to: EntityId,
-    ) -> Result<Vec<Relationship>, GraphStoreError> {
-        // HugeGraph 1.7.0's `edgeexist` returns nothing when `label` is passed
-        // for an edge label with sort keys, so the label is filtered here.
-        let query = [
-            ("source", json_string(&codec::vertex_id(graph_id, from))),
-            ("target", json_string(&codec::vertex_id(graph_id, to))),
-            ("limit", MAX_PARALLEL_EDGES.to_string()),
-        ];
-        let page: EdgePage = self
-            .client
-            .get(&["traversers", "edgeexist"], &query)
-            .await?;
-        page.edges
-            .iter()
-            .filter(|edge| edge.label == EDGE_LABEL)
-            .map(|edge| decode_relationship(graph_id, edge))
-            .filter(|decoded| {
-                decoded
-                    .as_ref()
-                    .map_or(true, |r| r.source_id() == from && r.target_id() == to)
-            })
-            .collect()
-    }
-
     /// Which of `ids` already exist as relationships in the graph.
     async fn existing_relationship_ids(
         &self,
@@ -298,6 +270,14 @@ impl HugeGraphStore {
 
 #[async_trait]
 impl GraphStore for HugeGraphStore {
+    async fn ping(&self) -> Result<(), GraphStoreError> {
+        let _label: Value = self
+            .client
+            .get(&["schema", "vertexlabels", VERTEX_LABEL], &[])
+            .await?;
+        Ok(())
+    }
+
     async fn create_entity(&self, entity: Entity) -> Result<(), GraphStoreError> {
         self.create_entities(vec![entity]).await
     }
@@ -516,36 +496,63 @@ impl GraphStore for HugeGraphStore {
             return GraphPath::new(entity, Vec::new()).map(Some);
         }
 
-        let direction = match query.direction() {
-            Direction::Outgoing => "OUT",
-            Direction::Incoming => "IN",
-            Direction::Both => "BOTH",
-        };
-        let params = [
-            ("source", json_string(&codec::vertex_id(graph_id, source))),
-            ("target", json_string(&codec::vertex_id(graph_id, target))),
-            ("direction", direction.to_owned()),
-            ("label", EDGE_LABEL.to_owned()),
-            ("max_depth", query.max_depth().to_string()),
-        ];
-        let response: PathResponse = self
-            .client
-            .get(&["traversers", "shortestpath"], &params)
-            .await?;
-        if response.path.is_empty() {
+        // Breadth-first search in MindGraph, one level per hop, exactly as the
+        // reference implementation (MemoryGraphStore): relationships are
+        // visited in id order and the first discovery of an entity wins, so
+        // both backends return the same path and each hop uses the smallest
+        // relationship id. HugeGraph's `shortestpath` traverser is not used:
+        // it allocates fixed-size records for every level and ran out of heap
+        // (OutOfMemoryError) on a 35-entity graph with 2 GiB (M10), which left
+        // the server refusing other requests.
+        let mut parents: BTreeMap<EntityId, (EntityId, Relationship)> = BTreeMap::new();
+        let mut visited = BTreeSet::from([source]);
+        let mut frontier = vec![source];
+        let mut expanded = 0_usize;
+        let mut found = false;
+        'search: for _ in 0..query.max_depth() {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next = Vec::new();
+            for &current in &frontier {
+                expanded += 1;
+                if expanded > MAX_PATH_EXPANSIONS {
+                    return Err(GraphStoreError::InvalidInput(format!(
+                        "the path search explored more than {MAX_PATH_EXPANSIONS} entities; \
+                         lower max_depth or choose closer entities"
+                    )));
+                }
+                let adjacent = self.adjacent(graph_id, current, query.direction()).await?;
+                for relationship in adjacent.into_values() {
+                    let Some(reached) = query.direction().follow(&relationship, current) else {
+                        continue;
+                    };
+                    if visited.insert(reached) {
+                        parents.insert(reached, (current, relationship));
+                        if reached == target {
+                            found = true;
+                            break 'search;
+                        }
+                        next.push(reached);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        if !found {
             return Ok(None);
         }
 
-        let mut path_ids = Vec::with_capacity(response.path.len());
-        for raw in &response.path {
-            let (path_graph, entity_id) = codec::parse_vertex_id(raw)?;
-            if path_graph != graph_id {
-                return Err(GraphStoreError::CorruptData(format!(
-                    "a path in graph {graph_id} crossed into graph {path_graph}"
-                )));
-            }
-            path_ids.push(entity_id);
+        let mut path_ids = vec![target];
+        let mut relationships = Vec::new();
+        let mut cursor = target;
+        while let Some((parent, relationship)) = parents.remove(&cursor) {
+            relationships.push(relationship);
+            path_ids.push(parent);
+            cursor = parent;
         }
+        path_ids.reverse();
+        relationships.reverse();
         let mut loaded = self
             .fetch_entities(graph_id, &path_ids.iter().copied().collect())
             .await?;
@@ -557,34 +564,11 @@ impl GraphStore for HugeGraphStore {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-
-        // The traverser does not say which of several parallel edges it used,
-        // so each hop takes the smallest relationship id, like the reference
-        // implementation.
-        let mut relationships = Vec::with_capacity(path_ids.len().saturating_sub(1));
-        for pair in path_ids.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            let mut candidates = Vec::new();
-            if query.direction() != Direction::Incoming {
-                candidates.extend(self.edges_between(graph_id, a, b).await?);
-            }
-            if query.direction() != Direction::Outgoing {
-                candidates.extend(self.edges_between(graph_id, b, a).await?);
-            }
-            let chosen = candidates
-                .into_iter()
-                .min_by_key(Relationship::id)
-                .ok_or_else(|| {
-                    GraphStoreError::CorruptData(format!(
-                        "no relationship connects path entities {a} and {b}"
-                    ))
-                })?;
-            relationships.push(chosen);
-        }
         debug!(
             operation = "find_path",
             %graph_id,
             hops = relationships.len(),
+            expanded,
             elapsed_ms = elapsed_ms(started),
             "HugeGraph read completed"
         );

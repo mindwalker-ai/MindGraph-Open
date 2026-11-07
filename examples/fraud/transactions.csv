@@ -1,0 +1,9 @@
+transaction_id,account_id,merchant_id,merchant_name,merchant_category,amount,currency,channel,occurred_at
+T001,A1001,M001,QuickPay Electronics,electronics,899.00,USD,card_not_present,2026-09-14T13:02:00Z
+T002,A1003,M001,QuickPay Electronics,electronics,899.00,USD,card_not_present,2026-09-14T13:09:00Z
+T003,A1001,M004,CryptoSwap Exchange,crypto_exchange,1200.00,USD,bank_transfer,2026-09-15T01:15:00Z
+T004,A1003,M004,CryptoSwap Exchange,crypto_exchange,1150.00,USD,bank_transfer,2026-09-15T01:21:00Z
+T005,A1002,M002,Sunrise Grocers,grocery,64.20,USD,card_present,2026-09-10T18:40:00Z
+T006,A1005,M003,Nusantara Travel,travel,430.00,USD,card_not_present,2026-08-28T09:05:00Z
+T007,A1006,M002,Sunrise Grocers,grocery,22.75,USD,card_present,2026-09-12T17:30:00Z
+T008,A1004,M004,CryptoSwap Exchange,crypto_exchange,15.00,USD,bank_transfer,2026-09-16T11:00:00Z

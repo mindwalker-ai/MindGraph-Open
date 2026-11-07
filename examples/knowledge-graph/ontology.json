@@ -1,0 +1,81 @@
+{
+  "entity_types": [
+    {
+      "name": "Person",
+      "display_name": "Person",
+      "properties": [
+        { "name": "person_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true },
+        { "name": "role", "type": "string", "required": false }
+      ]
+    },
+    {
+      "name": "Company",
+      "display_name": "Company",
+      "properties": [
+        { "name": "company_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true },
+        { "name": "industry", "type": "string", "required": false }
+      ]
+    },
+    {
+      "name": "Project",
+      "display_name": "Project",
+      "properties": [
+        { "name": "project_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true },
+        { "name": "status", "type": "string", "required": false }
+      ]
+    },
+    {
+      "name": "Document",
+      "display_name": "Document",
+      "properties": [
+        { "name": "document_id", "type": "string", "required": true },
+        { "name": "title", "type": "string", "required": true },
+        { "name": "doc_type", "type": "string", "required": false },
+        { "name": "published_at", "type": "datetime", "required": false }
+      ]
+    },
+    {
+      "name": "Topic",
+      "display_name": "Topic",
+      "properties": [
+        { "name": "topic_id", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true }
+      ]
+    }
+  ],
+  "relationship_types": [
+    {
+      "name": "WORKS_AT",
+      "source_entity_type": "Person",
+      "target_entity_type": "Company",
+      "properties": [{ "name": "since", "type": "datetime", "required": false }]
+    },
+    {
+      "name": "CONTRIBUTES_TO",
+      "source_entity_type": "Person",
+      "target_entity_type": "Project",
+      "properties": [{ "name": "contribution_role", "type": "string", "required": false }]
+    },
+    {
+      "name": "AUTHORED",
+      "source_entity_type": "Person",
+      "target_entity_type": "Document",
+      "properties": []
+    },
+    {
+      "name": "REFERENCES",
+      "source_entity_type": "Document",
+      "target_entity_type": "Project",
+      "properties": [{ "name": "section", "type": "string", "required": false }]
+    },
+    {
+      "name": "ABOUT",
+      "source_entity_type": "Document",
+      "target_entity_type": "Topic",
+      "properties": []
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "title": "Cyber investigation",
+  "summary": "users, endpoints, processes, network connections and DNS resolutions from one synthetic day",
+  "graph": {
+    "name": "Demo: Cyber investigation",
+    "description": "Synthetic cyber investigation demo loaded by `make demo-cyber`. Users and hosts are fictional; IP addresses and domains come from reserved documentation ranges (RFC 5737, RFC 2606). Nothing in it is a confirmed incident."
+  },
+  "ontology": "ontology.json",
+  "sources": [
+    { "file": "logins.csv", "mapping": "logins.mapping.json" },
+    { "file": "processes.csv", "mapping": "processes.mapping.json" },
+    { "file": "connections.csv", "mapping": "connections.mapping.json" },
+    { "file": "dns.csv", "mapping": "dns.mapping.json" }
+  ],
+  "expect": {
+    "entities": {
+      "User": 4,
+      "Endpoint": 4,
+      "Process": 6,
+      "IPAddress": 4,
+      "Domain": 5
+    },
+    "relationships_created": 23,
+    "find": [
+      {
+        "entity": { "entity_type": "User", "property": "user_id", "value": "j.santoso" },
+        "properties": { "display_name": "Joko Santoso", "department": "Finance" }
+      },
+      {
+        "entity": { "entity_type": "Process", "property": "process_id", "value": "PROC-3107" },
+        "properties": { "name": "updater.exe" }
+      }
+    ],
+    "neighbors": [
+      {
+        "of": { "entity_type": "Endpoint", "property": "endpoint_id", "value": "WS-FIN-07" },
+        "direction": "incoming",
+        "relationship_type": "LOGGED_INTO",
+        "count": 2
+      },
+      {
+        "of": { "entity_type": "IPAddress", "property": "address", "value": "203.0.113.45" },
+        "direction": "incoming",
+        "relationship_type": "CONNECTED_TO",
+        "count": 2
+      },
+      {
+        "of": { "entity_type": "IPAddress", "property": "address", "value": "203.0.113.45" },
+        "direction": "incoming",
+        "relationship_type": "RESOLVED_TO",
+        "count": 2
+      }
+    ],
+    "paths": [
+      {
+        "from": { "entity_type": "User", "property": "user_id", "value": "j.santoso" },
+        "to": { "entity_type": "Domain", "property": "domain", "value": "update-check.example.net" },
+        "hops": 4,
+        "via": ["LOGGED_INTO", "EXECUTED", "CONNECTED_TO", "RESOLVED_TO"]
+      },
+      {
+        "from": { "entity_type": "Endpoint", "property": "endpoint_id", "value": "WS-FIN-07" },
+        "to": { "entity_type": "Endpoint", "property": "endpoint_id", "value": "WS-FIN-12" },
+        "hops": 4,
+        "via": ["EXECUTED", "CONNECTED_TO", "CONNECTED_TO", "EXECUTED"]
+      }
+    ]
+  },
+  "explore": { "entity_type": "Endpoint", "property": "endpoint_id", "value": "WS-FIN-07" }
+}

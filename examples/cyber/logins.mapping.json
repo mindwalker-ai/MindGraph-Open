@@ -1,0 +1,73 @@
+{
+  "mapping": {
+    "entities": [
+      {
+        "alias": "user",
+        "entity_type": "User",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "user_id",
+            "property": "user_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "user_id",
+            "property": "user_id"
+          },
+          {
+            "source_field": "display_name",
+            "property": "display_name"
+          },
+          {
+            "source_field": "department",
+            "property": "department"
+          }
+        ]
+      },
+      {
+        "alias": "endpoint",
+        "entity_type": "Endpoint",
+        "mode": "create_or_match",
+        "identity": [
+          {
+            "source_field": "endpoint_id",
+            "property": "endpoint_id"
+          }
+        ],
+        "properties": [
+          {
+            "source_field": "endpoint_id",
+            "property": "endpoint_id"
+          },
+          {
+            "source_field": "hostname",
+            "property": "hostname"
+          },
+          {
+            "source_field": "os",
+            "property": "os"
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_type": "LOGGED_INTO",
+        "source": "user",
+        "target": "endpoint",
+        "properties": [
+          {
+            "source_field": "logon_type",
+            "property": "logon_type"
+          },
+          {
+            "source_field": "logged_in_at",
+            "property": "logged_in_at"
+          }
+        ]
+      }
+    ]
+  }
+}
