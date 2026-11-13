@@ -1,4 +1,4 @@
 # Every change to MindGraph Open needs an approving review from one of these
 # maintainers, never from the pull request's own author (enforced by the
 # "Protect main" ruleset with code owner review).
-* @ikhwankhaliddd @adamwisnupmw @mindwalker-labs
+* @ikhwankhaliddd @adamwisnupmw
