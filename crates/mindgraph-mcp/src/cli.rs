@@ -45,7 +45,6 @@ Docs: docs/mcp/README.md";
 /// Runs the command line `args` (without the program name) and returns the
 /// process exit code: 0 on success, 1 when serving or `--check` fails, 2 for
 /// usage or configuration errors.
-#[must_use]
 pub fn run(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.into_iter().collect();
     match args
